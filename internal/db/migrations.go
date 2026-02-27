@@ -1,0 +1,113 @@
+package db
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+const currentVersion = 1
+
+var migrations = []string{
+	// Version 1: Initial schema
+	`CREATE TABLE IF NOT EXISTS devices (
+		id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+		hostname TEXT NOT NULL UNIQUE,
+		custom_hostname TEXT UNIQUE,
+		identity_class TEXT NOT NULL CHECK (identity_class IN ('hardware_tpm', 'software_tpm')),
+		ek_fingerprint TEXT NOT NULL UNIQUE,
+		ak_public_key BYTEA NOT NULL,
+		ip_address INET,
+		timezone TEXT,
+		status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'suspended', 'revoked')),
+		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		last_seen_at TIMESTAMPTZ
+	);
+
+	CREATE TABLE IF NOT EXISTS nexus_instances (
+		id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+		hostname TEXT NOT NULL UNIQUE,
+		resolved_addresses INET[],
+		region TEXT,
+		heartbeat_interval_seconds INT NOT NULL DEFAULT 30,
+		status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+		registered_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	);
+
+	CREATE TABLE IF NOT EXISTS acme_challenges (
+		id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+		device_id UUID NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+		fqdn TEXT NOT NULL,
+		key_authorization TEXT NOT NULL,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		expires_at TIMESTAMPTZ NOT NULL,
+		UNIQUE(device_id, fqdn)
+	);
+
+	CREATE TABLE IF NOT EXISTS audit_log (
+		id BIGSERIAL PRIMARY KEY,
+		timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		actor_type TEXT NOT NULL CHECK (actor_type IN ('device', 'nexus', 'system')),
+		actor_id TEXT NOT NULL,
+		action TEXT NOT NULL,
+		resource_type TEXT NOT NULL,
+		resource_id TEXT,
+		details JSONB,
+		ip_address INET
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_audit_log_timestamp ON audit_log(timestamp);`,
+}
+
+func Migrate(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger) error {
+	_, err := pool.Exec(ctx, `
+		CREATE TABLE IF NOT EXISTS schema_version (
+			version INT NOT NULL,
+			applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)
+	`)
+	if err != nil {
+		return fmt.Errorf("create schema_version table: %w", err)
+	}
+
+	var version int
+	err = pool.QueryRow(ctx, "SELECT COALESCE(MAX(version), 0) FROM schema_version").Scan(&version)
+	if err != nil {
+		return fmt.Errorf("get current schema version: %w", err)
+	}
+
+	if version >= currentVersion {
+		logger.Info("database schema up to date", "version", version)
+		return nil
+	}
+
+	for i := version; i < currentVersion; i++ {
+		logger.Info("applying migration", "version", i+1)
+
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			return fmt.Errorf("begin migration tx (v%d): %w", i+1, err)
+		}
+
+		if _, err := tx.Exec(ctx, migrations[i]); err != nil {
+			tx.Rollback(ctx)
+			return fmt.Errorf("execute migration v%d: %w", i+1, err)
+		}
+
+		if _, err := tx.Exec(ctx, "INSERT INTO schema_version (version) VALUES ($1)", i+1); err != nil {
+			tx.Rollback(ctx)
+			return fmt.Errorf("record migration v%d: %w", i+1, err)
+		}
+
+		if err := tx.Commit(ctx); err != nil {
+			return fmt.Errorf("commit migration v%d: %w", i+1, err)
+		}
+
+		logger.Info("migration applied", "version", i+1)
+	}
+
+	return nil
+}

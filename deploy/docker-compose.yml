@@ -1,0 +1,50 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./init-db.sql:/docker-entrypoint-initdb.d/01-init.sql
+      - ./zone-bootstrap.sql:/docker-entrypoint-initdb.d/02-zone-bootstrap.sql
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  powerdns:
+    image: powerdns/pdns-auth-49:latest
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./pdns.conf:/etc/powerdns/pdns.conf:ro
+    ports:
+      - "53:53/udp"
+      - "53:53/tcp"
+      - "8081:8081"
+
+  namek:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+      powerdns:
+        condition: service_started
+    volumes:
+      - acme_certs:/var/lib/namek/acme_certs
+      - ./config.yaml:/etc/namek/config.yaml:ro
+    ports:
+      - "80:80"
+      - "443:443"
+    command: ["/namek", "-config", "/etc/namek/config.yaml"]
+
+volumes:
+  pgdata:
+  acme_certs:

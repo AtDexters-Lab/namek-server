@@ -1,0 +1,48 @@
+# Namek auto-obtains TLS via Let's Encrypt HTTP-01
+publicHostname: "namek.piccolospace.com"
+acmeCacheDir: "/var/lib/namek/acme_certs"
+listenAddress: ":443"
+httpAddress: ":80"
+
+database:
+  url: "postgres://namek:password@localhost:5432/namek?sslmode=disable"
+  maxOpenConns: 25
+  maxIdleConns: 5
+
+dns:
+  baseDomain: "piccolospace.com"
+  zone: "piccolospace.com."
+  relayHostname: "relay.piccolospace.com"
+
+powerDNS:
+  apiURL: "http://localhost:8081"
+  apiKey: "pdns-api-key"
+  serverID: "localhost"
+  timeoutSeconds: 10
+
+tpm:
+  trustedCACertsDir: ""
+  softwareCACertsDir: ""
+
+nexus:
+  trustedDomainSuffixes:
+    - ".nexus.piccolospace.com"
+  clientCACertFile: ""
+  heartbeatIntervalSeconds: 30
+  inactiveThresholdMultiplier: 3
+
+token:
+  ttlSeconds: 30
+  defaultWeight: 1
+  handshakeMaxAgeSeconds: 60
+  reauthIntervalSeconds: 300
+  reauthGraceSeconds: 30
+  maintenanceGraceCapSeconds: 600
+
+auditRetentionDays: 90
+
+enrollment:
+  maxPending: 1000
+  pendingTTLSeconds: 300
+  rateLimitPerSecond: 10
+  rateLimitPerIPPerSecond: 2

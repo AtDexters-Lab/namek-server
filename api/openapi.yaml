@@ -1,0 +1,558 @@
+openapi: 3.1.0
+info:
+  title: Namek Server API
+  description: |
+    Namek Server is the orchestrator/control plane for the Piccolo ecosystem.
+    It handles device authentication via TPM attestation, DNS-01 ACME orchestration,
+    Nexus relay management, and token issuance.
+  version: 0.1.0
+
+servers:
+  - url: https://namek.piccolospace.com
+    description: Production
+
+paths:
+  /health:
+    get:
+      summary: Liveness check
+      operationId: getHealth
+      tags: [System]
+      responses:
+        '200':
+          description: Server is alive
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+
+  /ready:
+    get:
+      summary: Readiness check
+      operationId: getReady
+      tags: [System]
+      responses:
+        '200':
+          description: Server is ready (PostgreSQL reachable)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ready
+        '503':
+          description: Server is not ready
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: not ready
+                  error:
+                    type: string
+
+  /api/v1/nonce:
+    get:
+      summary: Get a fresh nonce for TPM attestation
+      operationId: getNonce
+      tags: [Auth]
+      responses:
+        '200':
+          description: Nonce generated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NonceResponse'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /api/v1/devices/enroll:
+    post:
+      summary: Start device enrollment
+      operationId: startEnroll
+      tags: [Enrollment]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EnrollRequest'
+      responses:
+        '200':
+          description: Enrollment challenge created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EnrollResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          description: Device already enrolled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: EK verification failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /api/v1/devices/enroll/attest:
+    post:
+      summary: Complete device enrollment with attestation
+      operationId: completeEnroll
+      tags: [Enrollment]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AttestRequest'
+      responses:
+        '201':
+          description: Device enrolled successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AttestResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          description: Credential verification failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Device already enrolled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /api/v1/devices/me:
+    get:
+      summary: Get current device info
+      operationId: getDeviceMe
+      tags: [Device]
+      security:
+        - TPMAuth: []
+      responses:
+        '200':
+          description: Device info
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeviceInfo'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/devices/me/hostname:
+    patch:
+      summary: Claim or change custom hostname
+      operationId: updateHostname
+      tags: [Device]
+      security:
+        - TPMAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [custom_hostname]
+              properties:
+                custom_hostname:
+                  type: string
+                  pattern: '^[a-z0-9]{3,24}$'
+                  minLength: 3
+                  maxLength: 24
+      responses:
+        '200':
+          description: Hostname updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  custom_hostname:
+                    type: string
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/tokens/nexus:
+    post:
+      summary: Request a Nexus JWT token
+      operationId: issueNexusToken
+      tags: [Token]
+      security:
+        - TPMAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TokenRequest'
+      responses:
+        '200':
+          description: Token issued
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token:
+                    type: string
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/tokens/verify:
+    post:
+      summary: Verify a Nexus JWT token (called by Nexus)
+      operationId: verifyToken
+      tags: [Token]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token:
+                  type: string
+      responses:
+        '200':
+          description: Verification result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VerifyResponse'
+
+  /api/v1/acme/challenges:
+    post:
+      summary: Create ACME DNS-01 TXT record
+      operationId: createACMEChallenge
+      tags: [ACME]
+      security:
+        - TPMAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [digest]
+              properties:
+                digest:
+                  type: string
+                  description: Base64url-encoded SHA-256 of the ACME key authorization
+      responses:
+        '201':
+          description: Challenge created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChallengeResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/acme/challenges/{id}:
+    delete:
+      summary: Delete ACME DNS-01 TXT record
+      operationId: deleteACMEChallenge
+      tags: [ACME]
+      security:
+        - TPMAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '204':
+          description: Challenge deleted
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Challenge not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /internal/v1/nexus/register:
+    post:
+      summary: Nexus self-registration and heartbeat
+      operationId: registerNexus
+      tags: [Nexus]
+      security:
+        - mTLS: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                region:
+                  type: string
+                  description: Optional region identifier for future geo-routing
+      responses:
+        '200':
+          description: Registration accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  heartbeat_interval:
+                    type: integer
+                    description: Seconds between heartbeats
+
+components:
+  securitySchemes:
+    TPMAuth:
+      type: apiKey
+      in: header
+      name: X-Device-ID
+      description: |
+        Per-request TPM attestation via three headers:
+        - X-Device-ID: Device UUID
+        - X-Nonce: Server-issued nonce from GET /api/v1/nonce
+        - X-TPM-Quote: Base64-encoded TPM2 quote over the nonce
+    mTLS:
+      type: mutualTLS
+      description: Client certificate with SAN matching trusted domain suffix
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+
+    NonceResponse:
+      type: object
+      properties:
+        nonce:
+          type: string
+        expires_at:
+          type: string
+          format: date-time
+
+    EnrollRequest:
+      type: object
+      required: [ek_cert, ak_params]
+      properties:
+        ek_cert:
+          type: string
+          description: Base64-encoded DER EK certificate
+        ak_params:
+          type: string
+          description: Base64-encoded AK public parameters
+
+    EnrollResponse:
+      type: object
+      properties:
+        nonce:
+          type: string
+          description: Enrollment nonce (hex-encoded)
+        enc_credential:
+          type: string
+          description: Base64-encoded encrypted credential blob
+
+    AttestRequest:
+      type: object
+      required: [nonce, secret, quote]
+      properties:
+        nonce:
+          type: string
+          description: Nonce from enrollment response
+        secret:
+          type: string
+          description: Base64-encoded decrypted credential secret
+        quote:
+          type: string
+          description: Base64-encoded TPM2 quote
+
+    AttestResponse:
+      type: object
+      properties:
+        device_id:
+          type: string
+          format: uuid
+        hostname:
+          type: string
+          description: UUID-based hostname (e.g., abc123.piccolospace.com)
+        identity_class:
+          type: string
+          enum: [hardware_tpm, software_tpm]
+        nexus_endpoints:
+          type: array
+          items:
+            type: string
+          description: WebSocket URLs for Nexus instances
+        retry_after_seconds:
+          type: integer
+          description: Present when nexus_endpoints is empty
+
+    DeviceInfo:
+      type: object
+      properties:
+        device_id:
+          type: string
+          format: uuid
+        hostname:
+          type: string
+        custom_hostname:
+          type: string
+          nullable: true
+        status:
+          type: string
+          enum: [active, suspended, revoked]
+        identity_class:
+          type: string
+          enum: [hardware_tpm, software_tpm]
+        nexus_endpoints:
+          type: array
+          items:
+            type: string
+
+    TokenRequest:
+      type: object
+      required: [stage]
+      properties:
+        stage:
+          type: integer
+          enum: [0, 1, 2]
+          description: "0=handshake, 1=attest, 2=reauth"
+        session_nonce:
+          type: string
+          description: Required for stage 1 and 2
+
+    VerifyResponse:
+      type: object
+      properties:
+        valid:
+          type: boolean
+        claims:
+          $ref: '#/components/schemas/NexusClaims'
+        error:
+          type: string
+
+    NexusClaims:
+      type: object
+      properties:
+        hostnames:
+          type: array
+          items:
+            type: string
+        tcp_ports:
+          type: array
+          items:
+            type: integer
+        udp_routes:
+          type: array
+          items:
+            $ref: '#/components/schemas/UDPRouteClaim'
+        weight:
+          type: integer
+        session_nonce:
+          type: string
+        handshake_max_age_seconds:
+          type: integer
+          nullable: true
+        reauth_interval_seconds:
+          type: integer
+          nullable: true
+        reauth_grace_seconds:
+          type: integer
+          nullable: true
+        maintenance_grace_cap_seconds:
+          type: integer
+          nullable: true
+        authorizer_status_uri:
+          type: string
+        policy_version:
+          type: string
+        issued_at_quote:
+          type: string
+
+    UDPRouteClaim:
+      type: object
+      properties:
+        port:
+          type: integer
+        flow_idle_timeout_seconds:
+          type: integer
+          nullable: true
+
+    ChallengeResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        fqdn:
+          type: string
+
+  responses:
+    BadRequest:
+      description: Invalid request
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Unauthorized:
+      description: Authentication failed
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Forbidden:
+      description: Device suspended or revoked
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    RateLimited:
+      description: Rate limit exceeded
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    ServiceUnavailable:
+      description: Service temporarily unavailable
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
