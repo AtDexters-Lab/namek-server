@@ -9,10 +9,12 @@ import (
 )
 
 type Config struct {
-	PublicHostname string `yaml:"publicHostname"`
-	AcmeCacheDir   string `yaml:"acmeCacheDir"`
-	ListenAddress  string `yaml:"listenAddress"`
-	HTTPAddress    string `yaml:"httpAddress"`
+	PublicHostname   string `yaml:"publicHostname"`
+	AcmeCacheDir     string `yaml:"acmeCacheDir"`
+	AcmeDirectoryURL string `yaml:"acmeDirectoryURL"`
+	AcmeCACert       string `yaml:"acmeCACert"`
+	ListenAddress    string `yaml:"listenAddress"`
+	HTTPAddress      string `yaml:"httpAddress"`
 
 	Database   DatabaseConfig `yaml:"database"`
 	DNS        DNSConfig      `yaml:"dns"`

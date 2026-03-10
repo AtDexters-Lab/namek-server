@@ -1,5 +1,5 @@
 # Binaries
-namek
+/namek
 *.exe
 *.exe~
 *.dll
@@ -33,6 +33,10 @@ Thumbs.db
 
 # ACME certs
 acme_certs/
+.local/
+
+# Dev infra artifacts
+deploy/pebble/
 
 # Config with secrets
 config.yaml

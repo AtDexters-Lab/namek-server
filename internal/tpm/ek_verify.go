@@ -5,6 +5,7 @@ import (
 	"crypto"
 	"crypto/sha256"
 	"crypto/x509"
+	"encoding/asn1"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
@@ -52,6 +53,19 @@ func (v *realVerifier) VerifyEKCert(ekCertDER []byte) (string, crypto.PublicKey,
 	if err != nil {
 		return "", nil, fmt.Errorf("parse EK cert: %w", err)
 	}
+
+	// TPM EK certs contain SAN (2.5.29.17) with DirectoryName entries for TPM
+	// manufacturer info. Go's x509 can't parse these custom name types and marks
+	// SAN as an unhandled critical extension. We clear this since we don't need
+	// to validate TPM-specific SAN content for EK trust verification.
+	oidSAN := asn1.ObjectIdentifier{2, 5, 29, 17}
+	filtered := cert.UnhandledCriticalExtensions[:0]
+	for _, oid := range cert.UnhandledCriticalExtensions {
+		if !oid.Equal(oidSAN) {
+			filtered = append(filtered, oid)
+		}
+	}
+	cert.UnhandledCriticalExtensions = filtered
 
 	// EK certs typically lack ExtKeyUsageServerAuth (or have TPM-specific OIDs),
 	// so we use ExtKeyUsageAny to avoid rejecting valid certs.
