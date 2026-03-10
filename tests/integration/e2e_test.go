@@ -100,4 +100,41 @@ func TestFullFlow(t *testing.T) {
 	}
 	assert.NotEmpty(t, challenge.ID)
 	require.NoError(t, client.DeleteACMEChallenge(ctx, challenge.ID))
+
+	// 9. AK persistence: create a new TPM device with state dir, close it,
+	// reopen from the same state dir, and verify the AK is identical.
+	tpm.Close()
+
+	akStateDir := t.TempDir()
+	tpm2dev, err := tpmdevice.Open(ctx, proc.Addr(), tpmdevice.WithStateDir(akStateDir))
+	require.NoError(t, err, "open tpm with state dir (first time creates AK)")
+
+	akPub1, err := tpm2dev.AKPublic()
+	require.NoError(t, err)
+	tpm2dev.Close()
+
+	// Verify AK files were written
+	_, err = os.Stat(filepath.Join(akStateDir, "ak_pub"))
+	require.NoError(t, err, "ak_pub file should exist")
+	_, err = os.Stat(filepath.Join(akStateDir, "ak_priv"))
+	require.NoError(t, err, "ak_priv file should exist")
+
+	// Reopen — should load the persisted AK (same key material)
+	tpm2dev, err = tpmdevice.Open(ctx, proc.Addr(), tpmdevice.WithStateDir(akStateDir))
+	require.NoError(t, err, "open tpm with state dir (reload)")
+
+	akPub2, err := tpm2dev.AKPublic()
+	require.NoError(t, err)
+	assert.Equal(t, akPub1, akPub2, "reloaded AK public key should match original")
+
+	// 10. WithDeviceID: verify the option correctly sets the device ID
+	// on a new client (smoke test — full auth round-trip would require
+	// the server to know this AK, which differs from the enrolled one).
+	client2 := namekclient.New(serverURL, tpm2dev,
+		namekclient.WithInsecureSkipVerify(),
+		namekclient.WithDeviceID(result.DeviceID),
+	)
+	assert.Equal(t, result.DeviceID, client2.DeviceID())
+
+	tpm2dev.Close()
 }

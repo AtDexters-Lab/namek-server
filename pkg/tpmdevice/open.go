@@ -4,11 +4,19 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 
 	"github.com/google/go-tpm/legacy/tpm2"
 	"github.com/google/go-tpm/tpmutil"
+)
+
+const (
+	akPubFile  = "ak_pub"
+	akPrivFile = "ak_priv"
 )
 
 // EK cert NVRAM index per TCG EK Credential Profile
@@ -63,18 +71,34 @@ type device struct {
 	persistentEK bool // true if using persistent EK handle (don't flush)
 	ekCertDER    []byte
 	akPubRaw     []byte // TPMT_PUBLIC bytes
+	stateDir     string // if set, AK blobs are saved/loaded from this directory
+}
+
+// OpenOption configures how a Device is opened.
+type OpenOption func(*device)
+
+// WithStateDir enables AK persistence. When set, Open() will load AK blobs
+// from stateDir if they exist, or save newly-created AK blobs there.
+// Files written: ak_pub (TPMT_PUBLIC), ak_priv (TPM2B_PRIVATE).
+func WithStateDir(dir string) OpenOption {
+	return func(d *device) {
+		d.stateDir = dir
+	}
 }
 
 // Open connects to a TPM at the given address and initializes EK + AK.
 // addr is a Unix domain socket path (e.g. "/tmp/swtpm.sock" or "/dev/tpmrm0").
 // For swtpm, use the Unix socket path returned by Process.Addr().
-func Open(_ context.Context, addr string) (Device, error) {
+func Open(_ context.Context, addr string, opts ...OpenOption) (Device, error) {
 	rw, err := tpmutil.OpenTPM(addr)
 	if err != nil {
 		return nil, fmt.Errorf("open tpm %s: %w", addr, err)
 	}
 
 	d := &device{rw: rw}
+	for _, o := range opts {
+		o(d)
+	}
 	if err := d.init(); err != nil {
 		d.Close()
 		return nil, err
@@ -111,14 +135,14 @@ func (d *device) init() error {
 		return fmt.Errorf("create srk primary: %w", err)
 	}
 
-	// 4. Create AK under SRK
-	akPriv, akPub, _, _, _, err := tpm2.CreateKey(d.rw, srkHandle, tpm2.PCRSelection{}, "", "", akTemplate)
+	// 4. Create or load AK under SRK
+	akPub, akPriv, err := d.loadOrCreateAK(srkHandle)
 	if err != nil {
 		tpm2.FlushContext(d.rw, srkHandle)
-		return fmt.Errorf("create ak key: %w", err)
+		return err
 	}
 
-	// 5. Load AK
+	// 5. Load AK into TPM
 	akHandle, _, err := tpm2.Load(d.rw, srkHandle, "", akPub, akPriv)
 	if err != nil {
 		tpm2.FlushContext(d.rw, srkHandle)
@@ -133,6 +157,68 @@ func (d *device) init() error {
 	tpm2.FlushContext(d.rw, srkHandle)
 
 	return nil
+}
+
+// loadOrCreateAK returns AK public/private blobs, loading from stateDir if
+// available or creating a new key and persisting it.
+func (d *device) loadOrCreateAK(srkHandle tpmutil.Handle) (akPub, akPriv []byte, err error) {
+	if d.stateDir != "" {
+		akPub, akPriv, err = d.loadAKState()
+		if err == nil {
+			return akPub, akPriv, nil
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return nil, nil, fmt.Errorf("load ak state: %w", err)
+		}
+		// Files don't exist yet — fall through to create
+	}
+
+	akPriv, akPub, _, _, _, err = tpm2.CreateKey(d.rw, srkHandle, tpm2.PCRSelection{}, "", "", akTemplate)
+	if err != nil {
+		return nil, nil, fmt.Errorf("create ak key: %w", err)
+	}
+
+	if d.stateDir != "" {
+		if err := d.saveAKState(akPub, akPriv); err != nil {
+			return nil, nil, fmt.Errorf("save ak state: %w", err)
+		}
+	}
+
+	return akPub, akPriv, nil
+}
+
+func (d *device) loadAKState() (akPub, akPriv []byte, err error) {
+	akPub, err = os.ReadFile(filepath.Join(d.stateDir, akPubFile))
+	if err != nil {
+		return nil, nil, err
+	}
+	akPriv, err = os.ReadFile(filepath.Join(d.stateDir, akPrivFile))
+	if err != nil {
+		return nil, nil, err
+	}
+	return akPub, akPriv, nil
+}
+
+func (d *device) saveAKState(akPub, akPriv []byte) error {
+	if err := os.MkdirAll(d.stateDir, 0700); err != nil {
+		return err
+	}
+	// Write to temp files then rename for atomicity.
+	pubPath := filepath.Join(d.stateDir, akPubFile)
+	privPath := filepath.Join(d.stateDir, akPrivFile)
+
+	if err := writeFileAtomic(pubPath, akPub, 0600); err != nil {
+		return err
+	}
+	return writeFileAtomic(privPath, akPriv, 0600)
+}
+
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, perm); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }
 
 func (d *device) EKCertDER() ([]byte, error) {

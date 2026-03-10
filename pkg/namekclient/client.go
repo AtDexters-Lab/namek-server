@@ -50,6 +50,14 @@ func WithHTTPClient(hc *http.Client) Option {
 	}
 }
 
+// WithDeviceID restores a previously-enrolled device ID, allowing the client
+// to make authenticated requests without re-enrolling.
+func WithDeviceID(id string) Option {
+	return func(c *Client) {
+		c.deviceID = id
+	}
+}
+
 // New creates a namekclient that uses the given TPM device for attestation.
 func New(baseURL string, tpm tpmdevice.Device, opts ...Option) *Client {
 	c := &Client{
@@ -61,6 +69,11 @@ func New(baseURL string, tpm tpmdevice.Device, opts ...Option) *Client {
 		o(c)
 	}
 	return c
+}
+
+// DeviceID returns the current device ID, or empty if not yet enrolled.
+func (c *Client) DeviceID() string {
+	return c.deviceID
 }
 
 // Health calls GET /health.
