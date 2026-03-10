@@ -17,6 +17,7 @@ const (
 
 type Device struct {
 	ID             uuid.UUID    `json:"id"`
+	Slug           string       `json:"slug"`
 	Hostname       string       `json:"hostname"`
 	CustomHostname *string      `json:"custom_hostname"`
 	IdentityClass  string       `json:"identity_class"`
@@ -25,6 +26,11 @@ type Device struct {
 	IPAddress      net.IP       `json:"ip_address,omitempty"`
 	Timezone       *string      `json:"timezone,omitempty"`
 	Status         DeviceStatus `json:"status"`
-	CreatedAt      time.Time    `json:"created_at"`
-	LastSeenAt     *time.Time   `json:"last_seen_at,omitempty"`
+
+	HostnameChangesThisYear int        `json:"-"`
+	HostnameYear            int        `json:"-"`
+	LastHostnameChangeAt    *time.Time `json:"-"`
+
+	CreatedAt  time.Time  `json:"created_at"`
+	LastSeenAt *time.Time `json:"last_seen_at,omitempty"`
 }

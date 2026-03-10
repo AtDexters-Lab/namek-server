@@ -15,8 +15,8 @@ import (
 	"github.com/AtDexters-Lab/namek-server/internal/store"
 )
 
-// base64url-encoded SHA-256 (43 chars without padding)
-var acmeDigestRegex = regexp.MustCompile(`^[A-Za-z0-9_-]{43}$`)
+// printable ASCII: space (0x20) through tilde (0x7E)
+var printableASCIIRegex = regexp.MustCompile(`^[\x20-\x7E]+$`)
 
 const challengeTTL = 1 * time.Hour
 
@@ -41,6 +41,7 @@ func NewACMEService(acmeStore *store.ACMEStore, deviceStore *store.DeviceStore, 
 type CreateChallengeRequest struct {
 	DeviceID uuid.UUID
 	Digest   string
+	Hostname string // optional: defaults to canonical hostname
 }
 
 type CreateChallengeResponse struct {
@@ -49,8 +50,11 @@ type CreateChallengeResponse struct {
 }
 
 func (s *ACMEService) CreateChallenge(ctx context.Context, req CreateChallengeRequest) (*CreateChallengeResponse, error) {
-	if !acmeDigestRegex.MatchString(req.Digest) {
-		return nil, &ErrValidation{Message: "invalid digest: must be base64url-encoded SHA-256 (43 characters)"}
+	if len(req.Digest) == 0 || len(req.Digest) > 512 {
+		return nil, &ErrValidation{Message: "digest must be 1-512 characters"}
+	}
+	if !printableASCIIRegex.MatchString(req.Digest) {
+		return nil, &ErrValidation{Message: "digest must contain only printable ASCII"}
 	}
 
 	device, err := s.deviceStore.GetByID(ctx, req.DeviceID)
@@ -58,9 +62,19 @@ func (s *ACMEService) CreateChallenge(ctx context.Context, req CreateChallengeRe
 		return nil, fmt.Errorf("get device: %w", err)
 	}
 
-	// Derive FQDN from device hostname
-	// hostname is "uuid.basedomain" -> fqdn is "_acme-challenge.uuid.basedomain"
-	fqdn := fmt.Sprintf("_acme-challenge.%s", device.Hostname)
+	// Determine target hostname (default: canonical)
+	targetHostname := device.Hostname
+	if req.Hostname != "" {
+		customFQDN := ""
+		if device.CustomHostname != nil {
+			customFQDN = fmt.Sprintf("%s.%s", *device.CustomHostname, s.cfg.DNS.BaseDomain)
+		}
+		if req.Hostname != device.Hostname && req.Hostname != customFQDN {
+			return nil, &ErrValidation{Message: "hostname not authorized for this device"}
+		}
+		targetHostname = req.Hostname
+	}
+	fqdn := fmt.Sprintf("_acme-challenge.%s", targetHostname)
 
 	originalID := uuid.New()
 	challenge := &model.ACMEChallenge{

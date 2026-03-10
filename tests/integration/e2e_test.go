@@ -33,7 +33,7 @@ func TestFullFlow(t *testing.T) {
 	dbURL := envOr("NAMEK_TEST_DB", "postgres://namek:namek@localhost:5432/namek?sslmode=disable")
 	conn, err := pgx.Connect(ctx, dbURL)
 	require.NoError(t, err, "connect to DB for cleanup")
-	_, err = conn.Exec(ctx, "DELETE FROM audit_log; DELETE FROM devices")
+	_, err = conn.Exec(ctx, "DELETE FROM audit_log; DELETE FROM acme_challenges; DELETE FROM released_hostnames; DELETE FROM devices")
 	require.NoError(t, err, "clean DB")
 	conn.Close(ctx)
 
@@ -66,12 +66,14 @@ func TestFullFlow(t *testing.T) {
 	// 1. Health
 	require.NoError(t, client.Health(ctx))
 
-	// 2. Enroll
+	// 2. Enroll (fresh)
 	result, err := client.Enroll(ctx)
 	require.NoError(t, err)
 	assert.NotEmpty(t, result.DeviceID)
 	assert.Contains(t, result.Hostname, ".test.local")
 	assert.Equal(t, "software_tpm", result.IdentityClass)
+	// Slug-based hostname: should be 16-char slug + ".test.local", not UUID-based
+	assert.NotContains(t, result.Hostname, "-", "hostname should be slug-based, not UUID-based")
 
 	// 3. Device info (authenticated)
 	info, err := client.GetDeviceInfo(ctx)
@@ -92,8 +94,14 @@ func TestFullFlow(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, vr.Valid)
 
-	// 7-8. ACME challenge lifecycle
-	// base64url-encoded SHA-256 digest (43 chars, no padding)
+	// 7. Re-enrollment: same TPM enrolling again should succeed (active device)
+	result2, err := client.Enroll(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, result.DeviceID, result2.DeviceID, "re-enrollment should return same device ID")
+	assert.Equal(t, result.Hostname, result2.Hostname, "re-enrollment should preserve hostname")
+
+	// 8-9. ACME challenge lifecycle
+	// Digest validation now accepts any printable ASCII up to 512 chars
 	challenge, err := client.CreateACMEChallenge(ctx, "dGVzdHRlc3R0ZXN0dGVzdHRlc3R0ZXN0dGVzdHRlc3Q")
 	if err != nil {
 		t.Skipf("ACME challenge failed (PowerDNS?): %v", err)

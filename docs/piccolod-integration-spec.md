@@ -49,10 +49,10 @@ Namek uses a wildcard CNAME to route all device traffic through the relay:
 *.baseDomain.  CNAME  relay.baseDomain.
 ```
 
-This means **zero per-device DNS operations** for routing. When a device enrolls, its hostname (`<uuid>.baseDomain`) automatically resolves to the relay via the wildcard. Namek only touches DNS for:
+This means **zero per-device DNS operations** for routing. When a device enrolls, its hostname (`<slug>.baseDomain`) automatically resolves to the relay via the wildcard. Namek only touches DNS for:
 
 - Relay A records: pointing `relay.baseDomain` at active Nexus IPs
-- ACME TXT records: `_acme-challenge.<uuid>.baseDomain` for TLS cert issuance
+- ACME TXT records: `_acme-challenge.<hostname>.baseDomain` for TLS cert issuance
 
 ### Token flow
 
@@ -113,7 +113,7 @@ This sets the device ID so authenticated requests work without re-enrolling.
 ```json
 {
   "device_id": "550e8400-e29b-41d4-a716-446655440000",
-  "hostname": "550e8400-e29b-41d4-a716-446655440000.example.com",
+  "hostname": "a1b2c3d4e5f6g7h8.example.com",
   "identity_class": "hardware_tpm"
 }
 ```
@@ -207,10 +207,12 @@ Two-phase challenge-response:
 - Device decrypts credential via `ActivateCredential` (proves EK/AK binding)
 - Device generates TPM quote over enrollment nonce (proves AK possession)
 - Device sends decrypted secret + quote
-- Server verifies both, creates device record
-- Returns: device ID, hostname, identity class, Nexus endpoints
+- Server verifies both, creates device record with a 16-character base32-crockford slug as hostname label
+- Returns: device ID, hostname (`<slug>.baseDomain`), identity class, Nexus endpoints
 
 The `namekclient.Enroll()` method handles both phases in a single call.
+
+**Re-enrollment:** If an active device re-enrolls (same EK, new AK), the server updates the AK on the existing device record. Hostname, slug, and device ID are preserved. Suspended or revoked devices cannot re-enroll (409).
 
 ### Identity persistence
 
@@ -232,17 +234,19 @@ Identity file exists?
 │       ├── YES → Create client with WithDeviceID, resume
 │       │   └── Auth succeeds?
 │       │       ├── YES → Normal operation
-│       │       └── NO (401) → Delete identity, fresh enroll
+│       │       └── NO (401) → Re-enroll (AK may have been replaced)
 │       └── NO → Log error, retry with backoff
-└── NO → Fresh enrollment
+└── NO → Fresh enrollment (or re-enrollment if device was previously enrolled)
 ```
+
+**Re-enrollment:** If identity files are lost but the TPM still has the same EK, calling `Enroll()` again will re-enroll the device — updating the AK on the existing record and returning the same device ID and hostname. No admin intervention needed.
 
 ### Error recovery
 
 | Error | Meaning | Action |
 |-------|---------|--------|
 | TPM open fails | Device/permissions issue | Retry with backoff, check `/dev/tpmrm0` permissions |
-| Enroll returns 409 | EK already enrolled | Device is already known; if identity file is lost, requires admin DB cleanup |
+| Enroll returns 409 | EK enrolled on suspended/revoked device | Contact admin; active devices re-enroll automatically |
 | Enroll returns 503 | Pending enrollment capacity | Retry with backoff (server limit: `enrollment.maxPending`) |
 | Auth returns 401 | Nonce expired/invalid, or device not found | Re-fetch nonce and retry; if persistent, re-enroll |
 | Auth returns 403 | Device suspended/revoked | Stop retrying, alert operator |
@@ -314,8 +318,10 @@ Nexus tokens are JWTs issued by namek and presented by devices to the Nexus rela
   "iat": 1709000000,
   "exp": 1709000030,
   "hostnames": [
-    "550e8400-e29b-41d4-a716-446655440000.example.com",
-    "mydevice.example.com"
+    "a1b2c3d4e5f6g7h8.example.com",
+    "*.a1b2c3d4e5f6g7h8.example.com",
+    "mydevice.example.com",
+    "*.mydevice.example.com"
   ],
   "tcp_ports": [],
   "udp_routes": [],
@@ -338,7 +344,7 @@ Nexus tokens are JWTs issued by namek and presented by devices to the Nexus rela
 | `aud` | string[] | Always `["nexus"]` |
 | `iat` | int | Unix timestamp of issuance |
 | `exp` | int | Unix timestamp of expiry (default: `iat + 30s`) |
-| `hostnames` | string[] | Canonical hostname + custom hostname (if set) |
+| `hostnames` | string[] | Canonical + custom hostnames, each with a `*.` wildcard variant for subdomain routing |
 | `tcp_ports` | int[] | Allowed TCP ports (currently empty) |
 | `udp_routes` | object[] | UDP routing config (currently empty) |
 | `weight` | int | Load balancing weight (default: 1) |
@@ -362,10 +368,10 @@ Optional. Only needed if the device runs an HTTPS server that needs a valid TLS 
 ```
 1. Device computes ACME challenge digest:
    digest = base64url(SHA-256(key_authorization))
-   // 43 chars, no padding, matches: ^[A-Za-z0-9_-]{43}$
+   // Printable ASCII, max 512 characters
 
-2. Device calls: POST /api/v1/acme/challenges { "digest": "<digest>" }
-   → namek creates TXT record: _acme-challenge.<device-hostname> = <digest>
+2. Device calls: POST /api/v1/acme/challenges { "digest": "<digest>", "hostname": "<optional>" }
+   → namek creates TXT record: _acme-challenge.<target-hostname> = <digest>
    ← Returns: { "id": "<uuid>", "fqdn": "_acme-challenge.<hostname>" }
 
 3. Device tells ACME CA to validate the DNS-01 challenge
@@ -378,32 +384,46 @@ Optional. Only needed if the device runs an HTTPS server that needs a valid TLS 
 **Notes:**
 - Challenge TTL: 1 hour
 - Auto-cleanup: every 5 minutes, expired challenges and their DNS records are removed
-- ACME targets the **canonical hostname** (`<uuid>.baseDomain`), not the custom hostname
+- ACME challenges can target **any hostname the device owns** (canonical or custom FQDN). If `hostname` is omitted, defaults to the canonical hostname.
+- Digest validation: printable ASCII (0x20-0x7E), 1-512 characters
 - TXT record TTL in DNS: 300 seconds
 
 ## 8. Custom Hostname
 
-Devices get a canonical hostname at enrollment: `<uuid>.baseDomain`. They can optionally set a custom hostname for human-friendly access.
+Devices get a canonical hostname at enrollment: `<slug>.baseDomain` (16-char base32-crockford slug, 80 bits entropy). They can optionally set a custom hostname for human-friendly access.
 
 ### Validation rules
 
 - Pattern: `^[a-z0-9]{3,24}$` (lowercase alphanumeric, 3-24 chars)
 - No hyphens, underscores, or dots
 - Reserved words: `relay`, `namek`, `www`, `mail`, `ns1`, `ns2`, `admin`, `api`, `internal`
-- Must be unique across all devices
+- Must be unique across all devices and not match any device's slug (cross-namespace uniqueness)
+- Must not be in the released hostname cooldown period (default: 365 days)
 
 ### Effect on tokens
 
-When a custom hostname is set, the `hostnames` JWT claim includes both:
+When a custom hostname is set, the `hostnames` JWT claim includes both with wildcard variants:
 ```json
-["550e8400-e29b-41d4-a716-446655440000.example.com", "mydevice.example.com"]
+[
+  "a1b2c3d4e5f6g7h8.example.com",
+  "*.a1b2c3d4e5f6g7h8.example.com",
+  "mydevice.example.com",
+  "*.mydevice.example.com"
+]
 ```
 
 The custom hostname resolves via the same wildcard CNAME as the canonical hostname.
 
+### Rate limiting
+
+Hostname changes are rate-limited:
+- **Max changes per year:** 5 (default)
+- **Cooldown between changes:** 30 days (default)
+- **Released hostname cooldown:** 365 days (default) — after a device releases a hostname, no one can claim it for this duration
+
 ### Changing hostname
 
-A device can change its custom hostname at any time via `PATCH /api/v1/devices/me/hostname`. The new hostname replaces the old one. The old hostname becomes available for other devices.
+A device can change its custom hostname via `PATCH /api/v1/devices/me/hostname`, subject to rate limits. The old hostname is released and enters the cooldown period before it can be claimed by any device.
 
 ## 9. API Reference
 
@@ -469,7 +489,7 @@ Start enrollment. Rate-limited per-IP.
 | Status | Meaning |
 |--------|---------|
 | 400 | Invalid request body or encoding |
-| 409 | Device with this EK already enrolled |
+| 409 | Device with this EK is suspended or revoked (active devices proceed to re-enrollment) |
 | 429 | Rate limit exceeded (check `Retry-After` header) |
 | 500 | Internal error |
 | 503 | Enrollment capacity reached |
@@ -487,18 +507,20 @@ Complete enrollment with credential proof and TPM quote.
 }
 ```
 
-**Response:** `201 Created`
+**Response:** `201 Created` (fresh enrollment) or `200 OK` (re-enrollment)
 ```json
 {
   "device_id": "550e8400-e29b-41d4-a716-446655440000",
-  "hostname": "550e8400-e29b-41d4-a716-446655440000.example.com",
+  "hostname": "a1b2c3d4e5f6g7h8.example.com",
   "identity_class": "hardware_tpm",
   "nexus_endpoints": ["wss://relay.example.com/connect"],
-  "retry_after_seconds": 5
+  "retry_after_seconds": 5,
+  "reenrolled": true
 }
 ```
 
-`retry_after_seconds` is included only when `nexus_endpoints` is empty (no relay registered yet).
+- `retry_after_seconds` is included only when `nexus_endpoints` is empty (no relay registered yet).
+- `reenrolled` is `true` when an active device re-enrolls with a new AK. The device ID and hostname are preserved.
 
 **Errors:**
 | Status | Meaning |
@@ -552,7 +574,7 @@ Get device info.
 ```json
 {
   "device_id": "550e8400-e29b-41d4-a716-446655440000",
-  "hostname": "550e8400-e29b-41d4-a716-446655440000.example.com",
+  "hostname": "a1b2c3d4e5f6g7h8.example.com",
   "custom_hostname": "mydevice",
   "status": "active",
   "identity_class": "hardware_tpm",
@@ -577,7 +599,7 @@ Set or update custom hostname.
 **Errors:**
 | Status | Meaning |
 |--------|---------|
-| 400 | Invalid hostname (see validation rules in section 8) |
+| 400 | Invalid hostname, rate limit exceeded, cooldown not elapsed, or hostname in released cooldown (see section 8) |
 
 ---
 
@@ -646,21 +668,26 @@ Create an ACME DNS-01 challenge TXT record.
 
 **Request:**
 ```json
-{ "digest": "<43-char base64url SHA-256 digest>" }
+{
+  "digest": "<printable ASCII, 1-512 chars>",
+  "hostname": "<optional: canonical or custom FQDN>"
+}
 ```
+
+If `hostname` is omitted, the challenge targets the device's canonical hostname. If provided, the device must own the hostname (canonical or custom FQDN).
 
 **Response:** `201 Created`
 ```json
 {
   "id": "challenge-uuid",
-  "fqdn": "_acme-challenge.550e8400-e29b-41d4-a716-446655440000.example.com"
+  "fqdn": "_acme-challenge.a1b2c3d4e5f6g7h8.example.com"
 }
 ```
 
 **Errors:**
 | Status | Meaning |
 |--------|---------|
-| 400 | Invalid digest format |
+| 400 | Invalid digest format, or hostname not authorized |
 | 500 | DNS record creation failed |
 
 #### DELETE /api/v1/acme/challenges/:id
@@ -704,7 +731,7 @@ Delete an ACME challenge and its DNS record.
 | Scenario | What happens |
 |----------|-------------|
 | EK cert not trusted | `StartEnroll` returns 500 (logged as EK verification failure) |
-| EK already enrolled | `StartEnroll` returns 409 |
+| EK enrolled (suspended/revoked) | `StartEnroll` returns 409 (active devices re-enroll) |
 | Enrollment timeout (>300s between phases) | `CompleteEnroll` returns 400 (pending expired) |
 | Wrong secret | `CompleteEnroll` returns 401 |
 | Bad quote | `CompleteEnroll` returns 401 |
@@ -783,17 +810,13 @@ enrollment:
 
 ## 12. Known Limitations
 
-1. **No re-enrollment path.** If a device loses its identity file and AK state, it cannot re-enroll because the EK is already registered. Requires manual deletion of the device record from the database.
+1. **Ephemeral JWT signing secret.** Generated randomly at namek startup. All tokens are invalidated when namek restarts. Devices must request new tokens.
 
-2. **Ephemeral JWT signing secret.** Generated randomly at namek startup. All tokens are invalidated when namek restarts. Devices must request new tokens.
+2. **Single namek instance.** Pending enrollments are stored in memory. Multi-instance deployment would require shared state for the pending enrollment map.
 
-3. **Single namek instance.** Pending enrollments are stored in memory. Multi-instance deployment would require shared state for the pending enrollment map.
+3. **No PCR validation.** TPM quotes verify proof-of-possession of the AK only. PCR values in the quote are not checked against any reference measurements.
 
-4. **No PCR validation.** TPM quotes verify proof-of-possession of the AK only. PCR values in the quote are not checked against any reference measurements.
-
-5. **No admin API.** Device management (suspension, revocation, deletion) must be done directly in the database.
-
-6. **ACME targets canonical hostname only.** DNS-01 challenges are always created for `_acme-challenge.<uuid>.baseDomain`, not for custom hostnames.
+4. **No admin API.** Device management (suspension, revocation, deletion) must be done directly in the database.
 
 ## 13. Appendix: Wire Formats
 

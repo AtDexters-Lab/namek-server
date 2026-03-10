@@ -128,14 +128,21 @@ func (h *DeviceEnrollHandler) CompleteEnroll(c *gin.Context) {
 	}
 
 	result := gin.H{
-		"device_id":      resp.DeviceID,
-		"hostname":       resp.Hostname,
-		"identity_class": resp.IdentityClass,
+		"device_id":       resp.DeviceID,
+		"hostname":        resp.Hostname,
+		"identity_class":  resp.IdentityClass,
 		"nexus_endpoints": resp.NexusEndpoints,
+	}
+	if resp.Reenrolled {
+		result["reenrolled"] = true
 	}
 	if len(resp.NexusEndpoints) == 0 {
 		result["retry_after_seconds"] = 5
 	}
 
-	httputil.RespondCreated(c, result)
+	if resp.Reenrolled {
+		httputil.RespondOK(c, result)
+	} else {
+		httputil.RespondCreated(c, result)
+	}
 }

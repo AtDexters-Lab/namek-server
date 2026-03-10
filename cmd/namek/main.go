@@ -117,6 +117,25 @@ func main() {
 		}
 	}()
 
+	// Released hostname cleanup (daily)
+	go func() {
+		ticker := time.NewTicker(24 * time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				deleted, err := stores.Device.CleanupReleasedHostnames(ctx, cfg.Hostname.ReleasedCooldownDays)
+				if err != nil {
+					logger.Error("released hostname cleanup failed", "error", err)
+				} else if deleted > 0 {
+					logger.Info("released hostname cleanup", "deleted", deleted)
+				}
+			}
+		}
+	}()
+
 	// Audit log retention cleanup (daily)
 	go func() {
 		ticker := time.NewTicker(24 * time.Hour)

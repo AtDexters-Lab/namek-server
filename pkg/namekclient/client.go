@@ -122,6 +122,7 @@ type enrollCompleteResponse struct {
 	Hostname       string   `json:"hostname"`
 	IdentityClass  string   `json:"identity_class"`
 	NexusEndpoints []string `json:"nexus_endpoints"`
+	Reenrolled     bool     `json:"reenrolled"`
 }
 
 // Enroll performs the 2-phase enrollment flow.
@@ -180,6 +181,7 @@ func (c *Client) Enroll(ctx context.Context) (*EnrollResult, error) {
 		Hostname:       completeResp.Hostname,
 		IdentityClass:  completeResp.IdentityClass,
 		NexusEndpoints: completeResp.NexusEndpoints,
+		Reenrolled:     completeResp.Reenrolled,
 	}, nil
 }
 

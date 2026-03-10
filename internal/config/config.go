@@ -23,6 +23,7 @@ type Config struct {
 	Nexus      NexusConfig    `yaml:"nexus"`
 	Token      TokenConfig    `yaml:"token"`
 	Enrollment EnrollmentConfig `yaml:"enrollment"`
+	Hostname   HostnameConfig   `yaml:"hostname"`
 
 	AuditRetentionDays int `yaml:"auditRetentionDays"`
 }
@@ -75,10 +76,16 @@ type TokenConfig struct {
 }
 
 type EnrollmentConfig struct {
-	MaxPending            int `yaml:"maxPending"`
-	PendingTTLSeconds     int `yaml:"pendingTTLSeconds"`
-	RateLimitPerSecond    int `yaml:"rateLimitPerSecond"`
+	MaxPending              int `yaml:"maxPending"`
+	PendingTTLSeconds       int `yaml:"pendingTTLSeconds"`
+	RateLimitPerSecond      int `yaml:"rateLimitPerSecond"`
 	RateLimitPerIPPerSecond int `yaml:"rateLimitPerIPPerSecond"`
+}
+
+type HostnameConfig struct {
+	MaxChangesPerYear    int `yaml:"maxChangesPerYear"`
+	CooldownDays         int `yaml:"cooldownDays"`
+	ReleasedCooldownDays int `yaml:"releasedCooldownDays"`
 }
 
 func Load(path string) (*Config, error) {
@@ -162,6 +169,15 @@ func (c *Config) applyDefaults() {
 	if c.Enrollment.RateLimitPerIPPerSecond == 0 {
 		c.Enrollment.RateLimitPerIPPerSecond = 2
 	}
+	if c.Hostname.MaxChangesPerYear == 0 {
+		c.Hostname.MaxChangesPerYear = 5
+	}
+	if c.Hostname.CooldownDays == 0 {
+		c.Hostname.CooldownDays = 30
+	}
+	if c.Hostname.ReleasedCooldownDays == 0 {
+		c.Hostname.ReleasedCooldownDays = 365
+	}
 }
 
 func (c *Config) validate() error {
@@ -218,6 +234,15 @@ func (c *Config) validate() error {
 	}
 	if c.AuditRetentionDays <= 0 {
 		return fmt.Errorf("auditRetentionDays must be positive")
+	}
+	if c.Hostname.MaxChangesPerYear <= 0 {
+		return fmt.Errorf("hostname.maxChangesPerYear must be positive")
+	}
+	if c.Hostname.CooldownDays <= 0 {
+		return fmt.Errorf("hostname.cooldownDays must be positive")
+	}
+	if c.Hostname.ReleasedCooldownDays <= 0 {
+		return fmt.Errorf("hostname.releasedCooldownDays must be positive")
 	}
 	return nil
 }

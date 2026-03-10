@@ -26,7 +26,8 @@ func NewACMEHandler(acmeSvc *service.ACMEService, logger *slog.Logger) *ACMEHand
 }
 
 type createChallengeRequest struct {
-	Digest string `json:"digest" binding:"required"`
+	Digest   string `json:"digest" binding:"required"`
+	Hostname string `json:"hostname"`
 }
 
 func (h *ACMEHandler) CreateChallenge(c *gin.Context) {
@@ -41,6 +42,7 @@ func (h *ACMEHandler) CreateChallenge(c *gin.Context) {
 	resp, err := h.acmeSvc.CreateChallenge(c.Request.Context(), service.CreateChallengeRequest{
 		DeviceID: deviceID,
 		Digest:   req.Digest,
+		Hostname: req.Hostname,
 	})
 	if err != nil {
 		var validationErr *service.ErrValidation

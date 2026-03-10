@@ -6,6 +6,7 @@ type EnrollResult struct {
 	Hostname       string   `json:"hostname"`
 	IdentityClass  string   `json:"identity_class"`
 	NexusEndpoints []string `json:"nexus_endpoints"`
+	Reenrolled     bool     `json:"reenrolled,omitempty"`
 }
 
 // DeviceInfo is returned from GET /devices/me.
