@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net"
+	"slices"
 	"time"
 
 	"github.com/google/uuid"
@@ -256,30 +258,31 @@ func (s *NexusService) updateRelayDNS(ctx context.Context) error {
 		return fmt.Errorf("list active instances: %w", err)
 	}
 
-	// Collect all unique IPv4 addresses (A records only accept IPv4)
-	ipSet := make(map[string]bool)
+	// Collect IPv4 and IPv6 separately, filtering non-routable addresses
+	ipv4Set := make(map[string]bool)
+	ipv6Set := make(map[string]bool)
 	for _, inst := range instances {
 		for _, ip := range inst.ResolvedAddresses {
+			if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
+				continue
+			}
 			if ip4 := ip.To4(); ip4 != nil {
-				ipSet[ip4.String()] = true
+				ipv4Set[ip4.String()] = true
+			} else {
+				ipv6Set[ip.String()] = true
 			}
 		}
 	}
 
-	ips := make([]string, 0, len(ipSet))
-	for ip := range ipSet {
-		ips = append(ips, ip)
+	ipv4s := slices.Collect(maps.Keys(ipv4Set))
+	ipv6s := slices.Collect(maps.Keys(ipv6Set))
+
+	if len(ipv4s) == 0 && len(ipv6s) == 0 && len(instances) > 0 {
+		s.logger.Warn("no IP addresses found for active nexus instances",
+			"active_instances", len(instances))
 	}
 
-	if len(ips) == 0 {
-		if len(instances) > 0 {
-			s.logger.Warn("no IPv4 addresses found for active nexus instances, deleting relay A records",
-				"active_instances", len(instances))
-		}
-		return s.pdns.DeleteARecords(ctx, s.cfg.DNS.Zone, s.cfg.DNS.RelayHostname)
-	}
-
-	return s.pdns.SetARecords(ctx, s.cfg.DNS.Zone, s.cfg.DNS.RelayHostname, ips, 60)
+	return s.pdns.SetRelayRecords(ctx, s.cfg.DNS.Zone, s.cfg.DNS.RelayHostname, ipv4s, ipv6s, 60)
 }
 
 func ipsEqual(a []net.IP, b []net.IP) bool {

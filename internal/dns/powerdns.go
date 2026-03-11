@@ -50,30 +50,12 @@ type patchBody struct {
 
 // SetARecords replaces all A records for a name with the given IPs.
 func (c *PowerDNSClient) SetARecords(ctx context.Context, zone, name string, ips []string, ttl int) error {
-	records := make([]Record, len(ips))
-	for i, ip := range ips {
-		records[i] = Record{Content: ip, Disabled: false}
-	}
-
-	rrset := RRSet{
-		Name:       ensureDot(name),
-		Type:       "A",
-		TTL:        ttl,
-		ChangeType: "REPLACE",
-		Records:    records,
-	}
-
-	return c.patchRRSets(ctx, zone, []RRSet{rrset})
+	return c.patchRRSets(ctx, zone, []RRSet{replaceRRSet(ensureDot(name), "A", ips, ttl)})
 }
 
 // DeleteARecords removes all A records for a name.
 func (c *PowerDNSClient) DeleteARecords(ctx context.Context, zone, name string) error {
-	rrset := RRSet{
-		Name:       ensureDot(name),
-		Type:       "A",
-		ChangeType: "DELETE",
-	}
-	return c.patchRRSets(ctx, zone, []RRSet{rrset})
+	return c.patchRRSets(ctx, zone, []RRSet{deleteRRSet(ensureDot(name), "A")})
 }
 
 // SetTXTRecord creates or replaces a TXT record.
@@ -90,12 +72,47 @@ func (c *PowerDNSClient) SetTXTRecord(ctx context.Context, zone, name, value str
 
 // DeleteTXTRecord removes a TXT record.
 func (c *PowerDNSClient) DeleteTXTRecord(ctx context.Context, zone, name string) error {
-	rrset := RRSet{
-		Name:       ensureDot(name),
-		Type:       "TXT",
+	return c.patchRRSets(ctx, zone, []RRSet{deleteRRSet(ensureDot(name), "TXT")})
+}
+
+// SetRelayRecords atomically replaces A and AAAA records for the relay hostname.
+// Empty slices cause the corresponding record type to be deleted.
+func (c *PowerDNSClient) SetRelayRecords(ctx context.Context, zone, name string, ipv4, ipv6 []string, ttl int) error {
+	fqdn := ensureDot(name)
+	return c.patchRRSets(ctx, zone, []RRSet{
+		rrsetForIPs(fqdn, "A", ipv4, ttl),
+		rrsetForIPs(fqdn, "AAAA", ipv6, ttl),
+	})
+}
+
+// rrsetForIPs returns a REPLACE RRSet if ips is non-empty, otherwise a DELETE RRSet.
+func rrsetForIPs(fqdn, rrType string, ips []string, ttl int) RRSet {
+	if len(ips) > 0 {
+		return replaceRRSet(fqdn, rrType, ips, ttl)
+	}
+	return deleteRRSet(fqdn, rrType)
+}
+
+func replaceRRSet(fqdn, rrType string, values []string, ttl int) RRSet {
+	records := make([]Record, len(values))
+	for i, v := range values {
+		records[i] = Record{Content: v, Disabled: false}
+	}
+	return RRSet{
+		Name:       fqdn,
+		Type:       rrType,
+		TTL:        ttl,
+		ChangeType: "REPLACE",
+		Records:    records,
+	}
+}
+
+func deleteRRSet(fqdn, rrType string) RRSet {
+	return RRSet{
+		Name:       fqdn,
+		Type:       rrType,
 		ChangeType: "DELETE",
 	}
-	return c.patchRRSets(ctx, zone, []RRSet{rrset})
 }
 
 // Healthy checks if the PowerDNS API is reachable.
