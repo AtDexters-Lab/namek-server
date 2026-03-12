@@ -45,10 +45,14 @@ func (s *TokenService) IssueNexusToken(ctx context.Context, req IssueTokenReques
 		return "", fmt.Errorf("device is %s", device.Status)
 	}
 
-	// Build hostnames list
-	hostnames := []string{device.Hostname}
+	// Build hostnames list with wildcard variants for subdomain routing
+	hostnames := []string{
+		device.Hostname,
+		fmt.Sprintf("*.%s", device.Hostname),
+	}
 	if device.CustomHostname != nil {
-		hostnames = append(hostnames, fmt.Sprintf("%s.%s", *device.CustomHostname, s.cfg.DNS.BaseDomain))
+		customFQDN := fmt.Sprintf("%s.%s", *device.CustomHostname, s.cfg.DNS.BaseDomain)
+		hostnames = append(hostnames, customFQDN, fmt.Sprintf("*.%s", customFQDN))
 	}
 
 	tokenStr, err := s.issuer.Issue(token.IssueParams{

@@ -18,6 +18,7 @@ import (
 
 	"github.com/AtDexters-Lab/namek-server/internal/config"
 	"github.com/AtDexters-Lab/namek-server/internal/model"
+	"github.com/AtDexters-Lab/namek-server/internal/slug"
 	"github.com/AtDexters-Lab/namek-server/internal/store"
 	"github.com/AtDexters-Lab/namek-server/internal/tpm"
 )
@@ -36,9 +37,8 @@ var (
 	ErrDeviceAlreadyExists = errors.New("device with this EK already exists")
 	ErrQuoteVerification   = errors.New("quote verification failed")
 
-	// Lowercase alphanumeric only, 3-24 chars. This also structurally prevents
-	// collision with canonical hostnames (UUID format: 36 chars with hyphens),
-	// since hyphens are disallowed and max length is well below UUID length.
+	// Lowercase alphanumeric only, 3-24 chars. Cross-namespace uniqueness
+	// with slugs (16-char Crockford Base32) is enforced by IsLabelTaken.
 	hostnameRegex    = regexp.MustCompile(`^[a-z0-9]{3,24}$`)
 	reservedHostnames = map[string]bool{
 		"relay": true, "namek": true, "www": true, "mail": true,
@@ -48,14 +48,15 @@ var (
 )
 
 type PendingEnrollment struct {
-	EKPubKey        crypto.PublicKey
-	AKPubKeyDER     []byte
-	AKName          []byte
-	ChallengeSecret []byte
-	IdentityClass   string
-	EKFingerprint   string
-	ClientIP        net.IP
-	ExpiresAt       time.Time
+	EKPubKey         crypto.PublicKey
+	AKPubKeyDER      []byte
+	AKName           []byte
+	ChallengeSecret  []byte
+	IdentityClass    string
+	EKFingerprint    string
+	ClientIP         net.IP
+	ExpiresAt        time.Time
+	ExistingDeviceID *uuid.UUID // non-nil for re-enrollment of active devices
 }
 
 type DeviceService struct {
@@ -101,15 +102,18 @@ func (s *DeviceService) StartEnrollment(ctx context.Context, req EnrollRequest, 
 
 	ekFingerprint := verifier.EKFingerprint(req.EKCertDER)
 
-	// Reject if any device (active, suspended, or revoked) already owns this EK.
-	// EK fingerprints are globally unique — re-enrollment requires the old device
-	// to be explicitly deleted first.
-	_, err = s.deviceStore.GetByEKFingerprint(ctx, ekFingerprint)
+	// Check for existing device with this EK.
+	// Active devices can re-enroll (new AK replaces old); suspended/revoked are blocked.
+	var existingDeviceID *uuid.UUID
+	existing, err := s.deviceStore.GetByEKFingerprint(ctx, ekFingerprint)
 	if err != nil && !errors.Is(err, store.ErrDeviceNotFound) {
 		return nil, fmt.Errorf("check existing device: %w", err)
 	}
-	if err == nil {
-		return nil, ErrDeviceAlreadyExists
+	if existing != nil {
+		if existing.Status != model.DeviceStatusActive {
+			return nil, ErrDeviceAlreadyExists
+		}
+		existingDeviceID = &existing.ID
 	}
 
 	// Parse AK parameters
@@ -153,14 +157,15 @@ func (s *DeviceService) StartEnrollment(ctx context.Context, req EnrollRequest, 
 	}
 
 	pe := &PendingEnrollment{
-		EKPubKey:        ekPubKey,
-		AKPubKeyDER:     akPubKeyDER,
-		AKName:          akName,
-		ChallengeSecret: secret,
-		IdentityClass:   identityClass,
-		EKFingerprint:   ekFingerprint,
-		ClientIP:        req.ClientIP,
-		ExpiresAt:       time.Now().Add(s.cfg.PendingEnrollmentTTL()),
+		EKPubKey:         ekPubKey,
+		AKPubKeyDER:      akPubKeyDER,
+		AKName:           akName,
+		ChallengeSecret:  secret,
+		IdentityClass:    identityClass,
+		EKFingerprint:    ekFingerprint,
+		ClientIP:         req.ClientIP,
+		ExpiresAt:        time.Now().Add(s.cfg.PendingEnrollmentTTL()),
+		ExistingDeviceID: existingDeviceID,
 	}
 
 	s.pending[nonce] = pe
@@ -190,6 +195,7 @@ type AttestResponse struct {
 	Hostname       string    `json:"hostname"`
 	IdentityClass  string    `json:"identity_class"`
 	NexusEndpoints []string  `json:"nexus_endpoints"`
+	Reenrolled     bool      `json:"reenrolled,omitempty"`
 }
 
 func (s *DeviceService) CompleteEnrollment(ctx context.Context, req AttestRequest, verifier tpm.Verifier, nexusEndpoints []string) (*AttestResponse, error) {
@@ -222,25 +228,77 @@ func (s *DeviceService) CompleteEnrollment(ctx context.Context, req AttestReques
 		return nil, fmt.Errorf("%w: %w", ErrQuoteVerification, err)
 	}
 
-	// Create device
-	deviceID := uuid.New()
-	hostname := fmt.Sprintf("%s.%s", deviceID.String(), s.cfg.DNS.BaseDomain)
-
-	device := &model.Device{
-		ID:            deviceID,
-		Hostname:      hostname,
-		IdentityClass: pe.IdentityClass,
-		EKFingerprint: pe.EKFingerprint,
-		AKPublicKey:   pe.AKPubKeyDER,
-		IPAddress:     req.ClientIP,
-		Status:        model.DeviceStatusActive,
-	}
-
-	if err := s.deviceStore.Create(ctx, device); err != nil {
-		if errors.Is(err, store.ErrDuplicateEK) {
+	// Re-enrollment path: update AK on existing active device
+	if pe.ExistingDeviceID != nil {
+		device, err := s.deviceStore.GetByID(ctx, *pe.ExistingDeviceID)
+		if err != nil {
+			return nil, fmt.Errorf("get re-enrolled device: %w", err)
+		}
+		if device.Status != model.DeviceStatusActive {
 			return nil, ErrDeviceAlreadyExists
 		}
-		return nil, fmt.Errorf("create device: %w", err)
+		if err := s.deviceStore.UpdateAKPublicKey(ctx, device.ID, pe.AKPubKeyDER); err != nil {
+			return nil, fmt.Errorf("update ak: %w", err)
+		}
+
+		s.auditStore.LogAction(ctx, model.ActorTypeDevice, device.ID.String(),
+			"device.reenrolled", "device", strPtr(device.ID.String()), nil, req.ClientIP)
+
+		s.logger.Info("device re-enrolled",
+			"device_id", device.ID,
+			"hostname", device.Hostname,
+		)
+
+		return &AttestResponse{
+			DeviceID:       device.ID,
+			Hostname:       device.Hostname,
+			IdentityClass:  device.IdentityClass,
+			NexusEndpoints: nexusEndpoints,
+			Reenrolled:     true,
+		}, nil
+	}
+
+	// Fresh enrollment: generate slug and create device
+	deviceID := uuid.New()
+	const maxSlugAttempts = 3
+
+	var device *model.Device
+	for attempt := 0; attempt < maxSlugAttempts; attempt++ {
+		candidate := slug.Generate()
+		taken, err := s.deviceStore.IsLabelTaken(ctx, candidate)
+		if err != nil {
+			return nil, fmt.Errorf("check slug availability: %w", err)
+		}
+		if taken {
+			continue
+		}
+
+		hostname := fmt.Sprintf("%s.%s", candidate, s.cfg.DNS.BaseDomain)
+		device = &model.Device{
+			ID:            deviceID,
+			Slug:          candidate,
+			Hostname:      hostname,
+			IdentityClass: pe.IdentityClass,
+			EKFingerprint: pe.EKFingerprint,
+			AKPublicKey:   pe.AKPubKeyDER,
+			IPAddress:     req.ClientIP,
+			Status:        model.DeviceStatusActive,
+		}
+
+		if err := s.deviceStore.Create(ctx, device); err != nil {
+			if errors.Is(err, store.ErrDuplicateEK) {
+				return nil, ErrDeviceAlreadyExists
+			}
+			if errors.Is(err, store.ErrDuplicateSlug) {
+				device = nil // retry with new slug
+				continue
+			}
+			return nil, fmt.Errorf("create device: %w", err)
+		}
+		break // success
+	}
+	if device == nil {
+		return nil, fmt.Errorf("failed to generate unique slug after %d attempts", maxSlugAttempts)
 	}
 
 	s.auditStore.LogAction(ctx, model.ActorTypeDevice, deviceID.String(),
@@ -249,13 +307,14 @@ func (s *DeviceService) CompleteEnrollment(ctx context.Context, req AttestReques
 
 	s.logger.Info("device enrolled",
 		"device_id", deviceID,
-		"hostname", hostname,
+		"hostname", device.Hostname,
+		"slug", device.Slug,
 		"identity_class", pe.IdentityClass,
 	)
 
 	return &AttestResponse{
 		DeviceID:       deviceID,
-		Hostname:       hostname,
+		Hostname:       device.Hostname,
 		IdentityClass:  pe.IdentityClass,
 		NexusEndpoints: nexusEndpoints,
 	}, nil
@@ -271,11 +330,69 @@ func (s *DeviceService) SetCustomHostname(ctx context.Context, deviceID uuid.UUI
 		return &ErrValidation{Message: "hostname is reserved"}
 	}
 
-	if err := s.deviceStore.UpdateHostname(ctx, deviceID, hostname); err != nil {
+	device, err := s.deviceStore.GetByID(ctx, deviceID)
+	if err != nil {
+		return fmt.Errorf("get device: %w", err)
+	}
+
+	// Idempotent: no-op if already set to this hostname
+	if device.CustomHostname != nil && *device.CustomHostname == hostname {
+		return nil
+	}
+
+	// Rate limit: reset counter if year rolled over
+	currentYear := time.Now().UTC().Year()
+	changeCount := device.HostnameChangesThisYear
+	if device.HostnameYear != currentYear {
+		changeCount = 0
+	}
+
+	if changeCount >= s.cfg.Hostname.MaxChangesPerYear {
+		return &ErrValidation{Message: "hostname change limit reached for this year"}
+	}
+
+	if device.LastHostnameChangeAt != nil {
+		cooldown := time.Duration(s.cfg.Hostname.CooldownDays) * 24 * time.Hour
+		if time.Since(*device.LastHostnameChangeAt) < cooldown {
+			return &ErrValidation{Message: "hostname change cooldown period has not elapsed"}
+		}
+	}
+
+	// Check released hostname cooldown
+	released, err := s.deviceStore.IsHostnameReleased(ctx, hostname, s.cfg.Hostname.ReleasedCooldownDays)
+	if err != nil {
+		return fmt.Errorf("check released hostname: %w", err)
+	}
+	if released {
+		return &ErrValidation{Message: "hostname is in cooldown after being released"}
+	}
+
+	// Cross-namespace check: reject if hostname matches an existing slug
+	taken, err := s.deviceStore.IsLabelTaken(ctx, hostname)
+	if err != nil {
+		return fmt.Errorf("check label taken: %w", err)
+	}
+	if taken {
+		return &ErrValidation{Message: "hostname already taken"}
+	}
+
+	// Release previous custom hostname if set
+	if device.CustomHostname != nil {
+		if err := s.deviceStore.ReleaseHostname(ctx, *device.CustomHostname, deviceID); err != nil {
+			return fmt.Errorf("release old hostname: %w", err)
+		}
+	}
+
+	if err := s.deviceStore.SetCustomHostname(ctx, store.SetCustomHostnameParams{
+		DeviceID:       deviceID,
+		CustomHostname: hostname,
+		ChangeCount:    changeCount + 1,
+		HostnameYear:   currentYear,
+	}); err != nil {
 		if errors.Is(err, store.ErrDuplicateHostname) {
 			return &ErrValidation{Message: "hostname already taken"}
 		}
-		return fmt.Errorf("update hostname: %w", err)
+		return fmt.Errorf("set custom hostname: %w", err)
 	}
 
 	s.auditStore.LogAction(ctx, model.ActorTypeDevice, deviceID.String(),

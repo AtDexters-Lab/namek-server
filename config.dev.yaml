@@ -1,0 +1,34 @@
+publicHostname: "localhost"
+listenAddress: ":8443"
+httpAddress: ":8080"
+acmeCacheDir: ".local/acme_certs"
+acmeDirectoryURL: "https://localhost:14000/dir"
+acmeCACert: "deploy/pebble/pebble.minica.pem"
+
+database:
+  url: "postgres://namek:namek@localhost:5432/namek?sslmode=disable"
+
+dns:
+  baseDomain: "test.local"
+  zone: "test.local."
+  relayHostname: "relay.test.local"
+
+powerDNS:
+  apiURL: "http://localhost:8181"
+  apiKey: "pdns-dev-key"
+
+tpm:
+  softwareCACertsDir: ".local/swtpm/localca"
+  trustedCACertsDir: ""
+
+nexus:
+  trustedDomainSuffixes:
+    - ".nexus.test.local"
+
+enrollment:
+  maxPending: 100
+  pendingTTLSeconds: 300
+  rateLimitPerSecond: 100
+  rateLimitPerIPPerSecond: 50
+
+auditRetentionDays: 7

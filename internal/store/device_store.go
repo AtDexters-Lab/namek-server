@@ -18,6 +18,7 @@ import (
 var ErrDeviceNotFound = errors.New("device not found")
 var ErrDuplicateEK = errors.New("duplicate ek fingerprint")
 var ErrDuplicateHostname = errors.New("hostname already taken")
+var ErrDuplicateSlug = errors.New("duplicate slug")
 
 type DeviceStore struct {
 	pool *pgxpool.Pool
@@ -29,15 +30,17 @@ func NewDeviceStore(pool *pgxpool.Pool) *DeviceStore {
 
 func (s *DeviceStore) Create(ctx context.Context, d *model.Device) error {
 	_, err := s.pool.Exec(ctx, `
-		INSERT INTO devices (id, hostname, custom_hostname, identity_class, ek_fingerprint, ak_public_key, ip_address, status)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-	`, d.ID, d.Hostname, d.CustomHostname, d.IdentityClass, d.EKFingerprint, d.AKPublicKey, ipToString(d.IPAddress), d.Status)
+		INSERT INTO devices (id, slug, hostname, custom_hostname, identity_class, ek_fingerprint, ak_public_key, ip_address, status)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+	`, d.ID, d.Slug, d.Hostname, d.CustomHostname, d.IdentityClass, d.EKFingerprint, d.AKPublicKey, ipToString(d.IPAddress), d.Status)
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
 			switch pgErr.ConstraintName {
 			case "devices_hostname_key", "devices_custom_hostname_key":
 				return ErrDuplicateHostname
+			case "devices_slug_unique":
+				return ErrDuplicateSlug
 			default:
 				return ErrDuplicateEK
 			}
@@ -51,12 +54,16 @@ func (s *DeviceStore) GetByID(ctx context.Context, id uuid.UUID) (*model.Device,
 	d := &model.Device{}
 	var ipAddr *string
 	err := s.pool.QueryRow(ctx, `
-		SELECT id, hostname, custom_hostname, identity_class, ek_fingerprint, ak_public_key,
-		       ip_address::text, timezone, status, created_at, last_seen_at
+		SELECT id, slug, hostname, custom_hostname, identity_class, ek_fingerprint, ak_public_key,
+		       ip_address::text, timezone, status,
+		       hostname_changes_this_year, hostname_year, last_hostname_change_at,
+		       created_at, last_seen_at
 		FROM devices WHERE id = $1
 	`, id).Scan(
-		&d.ID, &d.Hostname, &d.CustomHostname, &d.IdentityClass, &d.EKFingerprint, &d.AKPublicKey,
-		&ipAddr, &d.Timezone, &d.Status, &d.CreatedAt, &d.LastSeenAt,
+		&d.ID, &d.Slug, &d.Hostname, &d.CustomHostname, &d.IdentityClass, &d.EKFingerprint, &d.AKPublicKey,
+		&ipAddr, &d.Timezone, &d.Status,
+		&d.HostnameChangesThisYear, &d.HostnameYear, &d.LastHostnameChangeAt,
+		&d.CreatedAt, &d.LastSeenAt,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -74,12 +81,16 @@ func (s *DeviceStore) GetByEKFingerprint(ctx context.Context, fingerprint string
 	d := &model.Device{}
 	var ipAddr *string
 	err := s.pool.QueryRow(ctx, `
-		SELECT id, hostname, custom_hostname, identity_class, ek_fingerprint, ak_public_key,
-		       ip_address::text, timezone, status, created_at, last_seen_at
+		SELECT id, slug, hostname, custom_hostname, identity_class, ek_fingerprint, ak_public_key,
+		       ip_address::text, timezone, status,
+		       hostname_changes_this_year, hostname_year, last_hostname_change_at,
+		       created_at, last_seen_at
 		FROM devices WHERE ek_fingerprint = $1
 	`, fingerprint).Scan(
-		&d.ID, &d.Hostname, &d.CustomHostname, &d.IdentityClass, &d.EKFingerprint, &d.AKPublicKey,
-		&ipAddr, &d.Timezone, &d.Status, &d.CreatedAt, &d.LastSeenAt,
+		&d.ID, &d.Slug, &d.Hostname, &d.CustomHostname, &d.IdentityClass, &d.EKFingerprint, &d.AKPublicKey,
+		&ipAddr, &d.Timezone, &d.Status,
+		&d.HostnameChangesThisYear, &d.HostnameYear, &d.LastHostnameChangeAt,
+		&d.CreatedAt, &d.LastSeenAt,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -93,20 +104,93 @@ func (s *DeviceStore) GetByEKFingerprint(ctx context.Context, fingerprint string
 	return d, nil
 }
 
-func (s *DeviceStore) UpdateHostname(ctx context.Context, id uuid.UUID, customHostname string) error {
+type SetCustomHostnameParams struct {
+	DeviceID        uuid.UUID
+	CustomHostname  string
+	ChangeCount     int
+	HostnameYear    int
+}
+
+func (s *DeviceStore) SetCustomHostname(ctx context.Context, p SetCustomHostnameParams) error {
 	tag, err := s.pool.Exec(ctx, `
-		UPDATE devices SET custom_hostname = $1 WHERE id = $2
-	`, customHostname, id)
+		UPDATE devices
+		SET custom_hostname = $1,
+		    hostname_changes_this_year = $2,
+		    hostname_year = $3,
+		    last_hostname_change_at = NOW()
+		WHERE id = $4
+	`, p.CustomHostname, p.ChangeCount, p.HostnameYear, p.DeviceID)
 	if err != nil {
 		if isDuplicateKeyError(err) {
 			return ErrDuplicateHostname
 		}
-		return fmt.Errorf("update hostname: %w", err)
+		return fmt.Errorf("set custom hostname: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
 		return ErrDeviceNotFound
 	}
 	return nil
+}
+
+func (s *DeviceStore) IsLabelTaken(ctx context.Context, label string) (bool, error) {
+	var exists bool
+	err := s.pool.QueryRow(ctx, `
+		SELECT EXISTS(SELECT 1 FROM devices WHERE slug = $1 OR custom_hostname = $1)
+	`, label).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("check label taken: %w", err)
+	}
+	return exists, nil
+}
+
+func (s *DeviceStore) UpdateAKPublicKey(ctx context.Context, id uuid.UUID, akPub []byte) error {
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE devices SET ak_public_key = $1 WHERE id = $2 AND status = 'active'
+	`, akPub, id)
+	if err != nil {
+		return fmt.Errorf("update ak public key: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrDeviceNotFound
+	}
+	return nil
+}
+
+func (s *DeviceStore) IsHostnameReleased(ctx context.Context, label string, cooldownDays int) (bool, error) {
+	var exists bool
+	err := s.pool.QueryRow(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM released_hostnames
+			WHERE label = $1 AND released_at > NOW() - make_interval(days => $2)
+		)
+	`, label, cooldownDays).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("check released hostname: %w", err)
+	}
+	return exists, nil
+}
+
+func (s *DeviceStore) ReleaseHostname(ctx context.Context, label string, deviceID uuid.UUID) error {
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO released_hostnames (label, released_by)
+		VALUES ($1, $2)
+		ON CONFLICT (label) DO UPDATE SET released_at = NOW(), released_by = $2
+	`, label, deviceID)
+	if err != nil {
+		return fmt.Errorf("release hostname: %w", err)
+	}
+	return nil
+}
+
+func (s *DeviceStore) CleanupReleasedHostnames(ctx context.Context, maxAgeDays int) (int64, error) {
+	tag, err := s.pool.Exec(ctx, `
+		DELETE FROM released_hostnames
+		WHERE released_at < NOW() - make_interval(days => $1)
+	`, maxAgeDays)
+	if err != nil {
+		return 0, fmt.Errorf("cleanup released hostnames: %w", err)
+	}
+	return tag.RowsAffected(), nil
 }
 
 func (s *DeviceStore) UpdateLastSeen(ctx context.Context, id uuid.UUID, ip net.IP) error {

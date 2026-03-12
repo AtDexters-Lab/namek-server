@@ -14,6 +14,7 @@ var migrations = []string{
 	// Version 1: Initial schema
 	`CREATE TABLE IF NOT EXISTS devices (
 		id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+		slug TEXT NOT NULL,
 		hostname TEXT NOT NULL UNIQUE,
 		custom_hostname TEXT UNIQUE,
 		identity_class TEXT NOT NULL CHECK (identity_class IN ('hardware_tpm', 'software_tpm')),
@@ -22,8 +23,12 @@ var migrations = []string{
 		ip_address INET,
 		timezone TEXT,
 		status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'suspended', 'revoked')),
+		hostname_changes_this_year INT NOT NULL DEFAULT 0,
+		hostname_year INT NOT NULL DEFAULT EXTRACT(YEAR FROM NOW()),
+		last_hostname_change_at TIMESTAMPTZ,
 		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-		last_seen_at TIMESTAMPTZ
+		last_seen_at TIMESTAMPTZ,
+		CONSTRAINT devices_slug_unique UNIQUE (slug)
 	);
 
 	CREATE TABLE IF NOT EXISTS nexus_instances (
@@ -45,6 +50,12 @@ var migrations = []string{
 		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 		expires_at TIMESTAMPTZ NOT NULL,
 		UNIQUE(device_id, fqdn)
+	);
+
+	CREATE TABLE IF NOT EXISTS released_hostnames (
+		label TEXT PRIMARY KEY,
+		released_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		released_by UUID REFERENCES devices(id) ON DELETE SET NULL
 	);
 
 	CREATE TABLE IF NOT EXISTS audit_log (

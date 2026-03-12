@@ -132,7 +132,7 @@ func NexusAuth(cfg *config.Config, clientCAs *x509.CertPool, logger *slog.Logger
 		opts := x509.VerifyOptions{
 			Roots:         clientCAs,
 			Intermediates: intermediates,
-			KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+			KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
 		}
 		if _, err := cert.Verify(opts); err != nil {
 			logger.Warn("nexus client cert verification failed", "error", err)
