@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/AtDexters-Lab/namek-server/internal/config"
 	"github.com/AtDexters-Lab/namek-server/internal/model"
@@ -60,24 +61,28 @@ type PendingEnrollment struct {
 }
 
 type DeviceService struct {
-	deviceStore *store.DeviceStore
-	auditStore  *store.AuditStore
-	cfg         *config.Config
-	logger      *slog.Logger
+	deviceStore  *store.DeviceStore
+	accountStore *store.AccountStore
+	auditStore   *store.AuditStore
+	pool         *pgxpool.Pool
+	cfg          *config.Config
+	logger       *slog.Logger
 
 	mu       sync.Mutex
 	pending  map[string]*PendingEnrollment // keyed by nonce
 	ekIndex  map[string]string             // ek_fingerprint -> nonce (for dedup)
 }
 
-func NewDeviceService(deviceStore *store.DeviceStore, auditStore *store.AuditStore, cfg *config.Config, logger *slog.Logger) *DeviceService {
+func NewDeviceService(deviceStore *store.DeviceStore, accountStore *store.AccountStore, auditStore *store.AuditStore, pool *pgxpool.Pool, cfg *config.Config, logger *slog.Logger) *DeviceService {
 	svc := &DeviceService{
-		deviceStore: deviceStore,
-		auditStore:  auditStore,
-		cfg:         cfg,
-		logger:      logger,
-		pending:     make(map[string]*PendingEnrollment),
-		ekIndex:     make(map[string]string),
+		deviceStore:  deviceStore,
+		accountStore: accountStore,
+		auditStore:   auditStore,
+		pool:         pool,
+		cfg:          cfg,
+		logger:       logger,
+		pending:      make(map[string]*PendingEnrollment),
+		ekIndex:      make(map[string]string),
 	}
 	return svc
 }
@@ -258,10 +263,12 @@ func (s *DeviceService) CompleteEnrollment(ctx context.Context, req AttestReques
 		}, nil
 	}
 
-	// Fresh enrollment: generate slug and create device
+	// Fresh enrollment: generate slug, create account + device in a transaction
 	deviceID := uuid.New()
+	accountID := uuid.New()
 	const maxSlugAttempts = 3
 
+	account := &model.Account{ID: accountID}
 	var device *model.Device
 	for attempt := 0; attempt < maxSlugAttempts; attempt++ {
 		candidate := slug.Generate()
@@ -276,6 +283,7 @@ func (s *DeviceService) CompleteEnrollment(ctx context.Context, req AttestReques
 		hostname := fmt.Sprintf("%s.%s", candidate, s.cfg.DNS.BaseDomain)
 		device = &model.Device{
 			ID:            deviceID,
+			AccountID:     accountID,
 			Slug:          candidate,
 			Hostname:      hostname,
 			IdentityClass: pe.IdentityClass,
@@ -285,7 +293,7 @@ func (s *DeviceService) CompleteEnrollment(ctx context.Context, req AttestReques
 			Status:        model.DeviceStatusActive,
 		}
 
-		if err := s.deviceStore.Create(ctx, device); err != nil {
+		if err := store.CreateDeviceWithAccount(ctx, s.pool, account, device); err != nil {
 			if errors.Is(err, store.ErrDuplicateEK) {
 				return nil, ErrDeviceAlreadyExists
 			}
@@ -293,7 +301,7 @@ func (s *DeviceService) CompleteEnrollment(ctx context.Context, req AttestReques
 				device = nil // retry with new slug
 				continue
 			}
-			return nil, fmt.Errorf("create device: %w", err)
+			return nil, fmt.Errorf("create device with account: %w", err)
 		}
 		break // success
 	}

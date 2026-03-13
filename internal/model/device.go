@@ -17,6 +17,7 @@ const (
 
 type Device struct {
 	ID             uuid.UUID    `json:"id"`
+	AccountID      uuid.UUID    `json:"account_id"`
 	Slug           string       `json:"slug"`
 	Hostname       string       `json:"hostname"`
 	CustomHostname *string      `json:"custom_hostname"`

@@ -12,8 +12,14 @@ const currentVersion = 1
 
 var migrations = []string{
 	// Version 1: Initial schema
-	`CREATE TABLE IF NOT EXISTS devices (
+	`CREATE TABLE IF NOT EXISTS accounts (
 		id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	);
+
+	CREATE TABLE IF NOT EXISTS devices (
+		id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+		account_id UUID NOT NULL REFERENCES accounts(id),
 		slug TEXT NOT NULL,
 		hostname TEXT NOT NULL UNIQUE,
 		custom_hostname TEXT UNIQUE,
@@ -30,6 +36,8 @@ var migrations = []string{
 		last_seen_at TIMESTAMPTZ,
 		CONSTRAINT devices_slug_unique UNIQUE (slug)
 	);
+
+	CREATE INDEX IF NOT EXISTS idx_devices_account_id ON devices(account_id);
 
 	CREATE TABLE IF NOT EXISTS nexus_instances (
 		id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -70,7 +78,30 @@ var migrations = []string{
 		ip_address INET
 	);
 
-	CREATE INDEX IF NOT EXISTS idx_audit_log_timestamp ON audit_log(timestamp);`,
+	CREATE INDEX IF NOT EXISTS idx_audit_log_timestamp ON audit_log(timestamp);
+
+	CREATE TABLE IF NOT EXISTS account_domains (
+		id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+		account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+		domain TEXT NOT NULL UNIQUE CHECK (domain = lower(domain)),
+		cname_target TEXT NOT NULL,
+		status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'verified')),
+		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		expires_at TIMESTAMPTZ,
+		verified_at TIMESTAMPTZ,
+		verified_by_device_id UUID REFERENCES devices(id) ON DELETE SET NULL
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_account_domains_account_id ON account_domains(account_id);
+
+	CREATE TABLE IF NOT EXISTS device_domain_assignments (
+		device_id UUID NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+		domain_id UUID NOT NULL REFERENCES account_domains(id) ON DELETE CASCADE,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		PRIMARY KEY (device_id, domain_id)
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_device_domain_assignments_domain_id ON device_domain_assignments(domain_id);`,
 }
 
 func Migrate(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger) error {

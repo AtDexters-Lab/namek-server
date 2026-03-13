@@ -16,13 +16,15 @@ import (
 type DeviceHandler struct {
 	deviceSvc *service.DeviceService
 	nexusSvc  *service.NexusService
+	domainSvc *service.DomainService
 	logger    *slog.Logger
 }
 
-func NewDeviceHandler(deviceSvc *service.DeviceService, nexusSvc *service.NexusService, logger *slog.Logger) *DeviceHandler {
+func NewDeviceHandler(deviceSvc *service.DeviceService, nexusSvc *service.NexusService, domainSvc *service.DomainService, logger *slog.Logger) *DeviceHandler {
 	return &DeviceHandler{
 		deviceSvc: deviceSvc,
 		nexusSvc:  nexusSvc,
+		domainSvc: domainSvc,
 		logger:    logger,
 	}
 }
@@ -42,10 +44,20 @@ func (h *DeviceHandler) GetMe(c *gin.Context) {
 		endpoints = []string{}
 	}
 
+	aliasDomains, err := h.domainSvc.GetDeviceAliasDomains(c.Request.Context(), d.ID)
+	if err != nil {
+		h.logger.Error("failed to get alias domains", "device_id", d.ID, "error", err)
+		aliasDomains = []string{}
+	}
+	if aliasDomains == nil {
+		aliasDomains = []string{}
+	}
+
 	resp := gin.H{
 		"device_id":       d.ID,
 		"hostname":        d.Hostname,
 		"custom_hostname": d.CustomHostname,
+		"alias_domains":   aliasDomains,
 		"status":          d.Status,
 		"identity_class":  d.IdentityClass,
 		"nexus_endpoints": endpoints,

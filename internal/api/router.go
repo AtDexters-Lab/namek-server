@@ -30,6 +30,7 @@ type RouterDeps struct {
 	NexusSvc    *service.NexusService
 	TokenSvc    *service.TokenService
 	ACMESvc     *service.ACMEService
+	DomainSvc   *service.DomainService
 	DeviceStore *store.DeviceStore
 	Pool        *pgxpool.Pool
 	PowerDNS    *dns.PowerDNSClient
@@ -49,7 +50,8 @@ func NewRouter(deps RouterDeps) http.Handler {
 	healthH := handler.NewHealthHandler(deps.Pool)
 	nonceH := handler.NewNonceHandler(deps.NonceStore)
 	enrollH := handler.NewDeviceEnrollHandler(deps.DeviceSvc, deps.NexusSvc, deps.TPMVerifier, deps.Logger)
-	deviceH := handler.NewDeviceHandler(deps.DeviceSvc, deps.NexusSvc, deps.Logger)
+	deviceH := handler.NewDeviceHandler(deps.DeviceSvc, deps.NexusSvc, deps.DomainSvc, deps.Logger)
+	domainH := handler.NewDomainHandler(deps.DomainSvc, deps.Logger)
 	tokenH := handler.NewTokenHandler(deps.TokenSvc, deps.Logger)
 	verifyH := handler.NewVerifyHandler(deps.TokenSvc)
 	nexusH := handler.NewNexusRegisterHandler(deps.NexusSvc, deps.Logger)
@@ -90,6 +92,19 @@ func NewRouter(deps RouterDeps) http.Handler {
 		deviceAuth.POST("/tokens/nexus", tokenH.IssueNexusToken)
 		deviceAuth.POST("/acme/challenges", acmeH.CreateChallenge)
 		deviceAuth.DELETE("/acme/challenges/:id", acmeH.DeleteChallenge)
+
+		// Domain management with per-device rate limiting
+		domainRoutes := deviceAuth.Group("/domains")
+		domainRoutes.Use(auth.DeviceRateLimit(10, 30))
+		{
+			domainRoutes.POST("", domainH.RegisterDomain)
+			domainRoutes.GET("", domainH.ListDomains)
+			domainRoutes.POST("/:id/verify", domainH.VerifyDomain)
+			domainRoutes.DELETE("/:id", domainH.DeleteDomain)
+			domainRoutes.GET("/:id/assignments", domainH.ListAssignments)
+			domainRoutes.POST("/:id/assignments", domainH.AssignDomain)
+			domainRoutes.DELETE("/:id/assignments/:device_id", domainH.UnassignDomain)
+		}
 	}
 
 	// Load Nexus client CA if configured. On any failure, leave clientCAs nil

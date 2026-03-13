@@ -402,7 +402,7 @@ This query runs on every token issuance (every ~30s per device). The composite P
 
 ### ACME service
 
-`CreateChallenge` hostname authorization check must also accept alias domains assigned to the device. When the requested hostname is not the canonical or custom hostname, check `device_domain_assignments` for a matching verified alias domain.
+No changes needed. Alias domains use HTTP-01 handled by the device directly via Nexus passthrough. Namek's ACME service is for DNS-01 via PowerDNS, which only applies to baseDomain hostnames. The existing hostname authorization check (canonical + custom only) is correct as-is.
 
 ### Enrollment
 
