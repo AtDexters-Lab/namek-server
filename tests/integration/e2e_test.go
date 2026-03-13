@@ -33,7 +33,7 @@ func TestFullFlow(t *testing.T) {
 	dbURL := envOr("NAMEK_TEST_DB", "postgres://namek:namek@localhost:5432/namek?sslmode=disable")
 	conn, err := pgx.Connect(ctx, dbURL)
 	require.NoError(t, err, "connect to DB for cleanup")
-	_, err = conn.Exec(ctx, "DELETE FROM audit_log; DELETE FROM acme_challenges; DELETE FROM released_hostnames; DELETE FROM devices")
+	_, err = conn.Exec(ctx, "DELETE FROM audit_log; DELETE FROM device_domain_assignments; DELETE FROM account_domains; DELETE FROM acme_challenges; DELETE FROM released_hostnames; DELETE FROM devices; DELETE FROM accounts")
 	require.NoError(t, err, "clean DB")
 	conn.Close(ctx)
 

@@ -15,14 +15,16 @@ import (
 
 type TokenService struct {
 	deviceStore *store.DeviceStore
+	domainStore *store.DomainStore
 	issuer      *token.Issuer
 	cfg         *config.Config
 	logger      *slog.Logger
 }
 
-func NewTokenService(deviceStore *store.DeviceStore, issuer *token.Issuer, cfg *config.Config, logger *slog.Logger) *TokenService {
+func NewTokenService(deviceStore *store.DeviceStore, domainStore *store.DomainStore, issuer *token.Issuer, cfg *config.Config, logger *slog.Logger) *TokenService {
 	return &TokenService{
 		deviceStore: deviceStore,
+		domainStore: domainStore,
 		issuer:      issuer,
 		cfg:         cfg,
 		logger:      logger,
@@ -53,6 +55,16 @@ func (s *TokenService) IssueNexusToken(ctx context.Context, req IssueTokenReques
 	if device.CustomHostname != nil {
 		customFQDN := fmt.Sprintf("%s.%s", *device.CustomHostname, s.cfg.DNS.BaseDomain)
 		hostnames = append(hostnames, customFQDN, fmt.Sprintf("*.%s", customFQDN))
+	}
+
+	// Append alias domains
+	aliasDomains, err := s.domainStore.GetDeviceAliasDomains(ctx, req.DeviceID)
+	if err != nil {
+		s.logger.Error("failed to get alias domains for token", "device_id", req.DeviceID, "error", err)
+		// Non-fatal: continue with base hostnames
+	}
+	for _, ad := range aliasDomains {
+		hostnames = append(hostnames, ad, fmt.Sprintf("*.%s", ad))
 	}
 
 	tokenStr, err := s.issuer.Issue(token.IssueParams{

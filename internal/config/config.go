@@ -23,7 +23,8 @@ type Config struct {
 	Nexus      NexusConfig    `yaml:"nexus"`
 	Token      TokenConfig    `yaml:"token"`
 	Enrollment EnrollmentConfig `yaml:"enrollment"`
-	Hostname   HostnameConfig   `yaml:"hostname"`
+	Hostname     HostnameConfig     `yaml:"hostname"`
+	AliasDomain  AliasDomainConfig  `yaml:"aliasDomain"`
 
 	AuditRetentionDays int `yaml:"auditRetentionDays"`
 }
@@ -86,6 +87,13 @@ type HostnameConfig struct {
 	MaxChangesPerYear    int `yaml:"maxChangesPerYear"`
 	CooldownDays         int `yaml:"cooldownDays"`
 	ReleasedCooldownDays int `yaml:"releasedCooldownDays"`
+}
+
+type AliasDomainConfig struct {
+	MaxPerAccount              int    `yaml:"maxPerAccount"`
+	PendingExpiryDays          int    `yaml:"pendingExpiryDays"`
+	VerificationTimeoutSeconds int    `yaml:"verificationTimeoutSeconds"`
+	DNSResolver                string `yaml:"dnsResolver"`
 }
 
 func Load(path string) (*Config, error) {
@@ -178,6 +186,15 @@ func (c *Config) applyDefaults() {
 	if c.Hostname.ReleasedCooldownDays == 0 {
 		c.Hostname.ReleasedCooldownDays = 365
 	}
+	if c.AliasDomain.MaxPerAccount == 0 {
+		c.AliasDomain.MaxPerAccount = 50
+	}
+	if c.AliasDomain.PendingExpiryDays == 0 {
+		c.AliasDomain.PendingExpiryDays = 7
+	}
+	if c.AliasDomain.VerificationTimeoutSeconds == 0 {
+		c.AliasDomain.VerificationTimeoutSeconds = 10
+	}
 }
 
 func (c *Config) validate() error {
@@ -244,6 +261,15 @@ func (c *Config) validate() error {
 	if c.Hostname.ReleasedCooldownDays <= 0 {
 		return fmt.Errorf("hostname.releasedCooldownDays must be positive")
 	}
+	if c.AliasDomain.MaxPerAccount <= 0 {
+		return fmt.Errorf("aliasDomain.maxPerAccount must be positive")
+	}
+	if c.AliasDomain.PendingExpiryDays <= 0 {
+		return fmt.Errorf("aliasDomain.pendingExpiryDays must be positive")
+	}
+	if c.AliasDomain.VerificationTimeoutSeconds <= 0 {
+		return fmt.Errorf("aliasDomain.verificationTimeoutSeconds must be positive")
+	}
 	return nil
 }
 
@@ -265,4 +291,12 @@ func (c *Config) InactiveThreshold() time.Duration {
 
 func (c *Config) PendingEnrollmentTTL() time.Duration {
 	return time.Duration(c.Enrollment.PendingTTLSeconds) * time.Second
+}
+
+func (c *Config) PendingDomainExpiry() time.Duration {
+	return time.Duration(c.AliasDomain.PendingExpiryDays) * 24 * time.Hour
+}
+
+func (c *Config) VerificationTimeout() time.Duration {
+	return time.Duration(c.AliasDomain.VerificationTimeoutSeconds) * time.Second
 }

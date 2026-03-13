@@ -93,15 +93,20 @@ func main() {
 		os.Exit(1)
 	}
 
+	// CNAME resolver
+	cnameResolver := dns.NewDNSCNAMEResolver(cfg.AliasDomain.DNSResolver, cfg.VerificationTimeout())
+
 	// Services
-	deviceSvc := service.NewDeviceService(stores.Device, stores.Audit, cfg, logger)
+	deviceSvc := service.NewDeviceService(stores.Device, stores.Account, stores.Audit, pool, cfg, logger)
 	nexusSvc := service.NewNexusService(stores.Nexus, stores.Audit, pdns, cfg, logger)
-	tokenSvc := service.NewTokenService(stores.Device, tokenIssuer, cfg, logger)
+	tokenSvc := service.NewTokenService(stores.Device, stores.Domain, tokenIssuer, cfg, logger)
 	acmeSvc := service.NewACMEService(stores.ACME, stores.Device, pdns, cfg, logger)
+	domainSvc := service.NewDomainService(stores.Domain, stores.Device, stores.Audit, cnameResolver, cfg, logger)
 
 	// Start background goroutines
 	go nexusSvc.HealthCheckLoop(ctx)
 	go acmeSvc.CleanupLoop(ctx)
+	go domainSvc.CleanupLoop(ctx)
 
 	// Pending enrollment cleanup (every 60s)
 	go func() {
@@ -174,6 +179,7 @@ func main() {
 		NexusSvc:    nexusSvc,
 		TokenSvc:    tokenSvc,
 		ACMESvc:     acmeSvc,
+		DomainSvc:   domainSvc,
 		DeviceStore: stores.Device,
 		Pool:        pool,
 		PowerDNS:    pdns,

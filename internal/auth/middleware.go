@@ -184,6 +184,98 @@ func NexusAuth(cfg *config.Config, clientCAs *x509.CertPool, logger *slog.Logger
 	}
 }
 
+// DeviceRateLimit implements per-device rate limiting with separate limits for mutations and reads.
+func DeviceRateLimit(mutationPerMin, readPerMin int) gin.HandlerFunc {
+	const staleAfter = 5 * time.Minute
+
+	type bucket struct {
+		tokens    float64
+		lastCheck time.Time
+	}
+
+	type deviceBuckets struct {
+		mutation *bucket
+		read     *bucket
+	}
+
+	var mu sync.Mutex
+	devices := make(map[uuid.UUID]*deviceBuckets)
+	lastCleanup := time.Now()
+
+	refill := func(b *bucket, ratePerMin int) {
+		now := time.Now()
+		elapsed := now.Sub(b.lastCheck).Seconds()
+		rate := float64(ratePerMin) / 60.0
+		b.tokens += elapsed * rate
+		max := float64(ratePerMin)
+		if b.tokens > max {
+			b.tokens = max
+		}
+		b.lastCheck = now
+	}
+
+	return func(c *gin.Context) {
+		deviceIDVal, exists := c.Get(ContextKeyDeviceID)
+		if !exists {
+			c.Next()
+			return
+		}
+		deviceID := deviceIDVal.(uuid.UUID)
+
+		mu.Lock()
+
+		// Periodic cleanup
+		if time.Since(lastCleanup) > time.Minute {
+			now := time.Now()
+			for id, db := range devices {
+				latest := db.mutation.lastCheck
+				if db.read.lastCheck.After(latest) {
+					latest = db.read.lastCheck
+				}
+				if now.Sub(latest) > staleAfter {
+					delete(devices, id)
+				}
+			}
+			lastCleanup = now
+		}
+
+		db, ok := devices[deviceID]
+		if !ok {
+			db = &deviceBuckets{
+				mutation: &bucket{tokens: float64(mutationPerMin), lastCheck: time.Now()},
+				read:     &bucket{tokens: float64(readPerMin), lastCheck: time.Now()},
+			}
+			devices[deviceID] = db
+		}
+
+		isMutation := c.Request.Method == "POST" || c.Request.Method == "DELETE"
+
+		var b *bucket
+		var rate int
+		if isMutation {
+			b = db.mutation
+			rate = mutationPerMin
+		} else {
+			b = db.read
+			rate = readPerMin
+		}
+
+		refill(b, rate)
+		if b.tokens < 1 {
+			mu.Unlock()
+			c.Header("Retry-After", "1")
+			httputil.RespondError(c, http.StatusTooManyRequests, "rate limit exceeded")
+			c.Abort()
+			return
+		}
+
+		b.tokens--
+		mu.Unlock()
+
+		c.Next()
+	}
+}
+
 // RateLimit implements a simple token bucket rate limiter with periodic cleanup.
 func RateLimit(globalRPS, perIPRPS int) gin.HandlerFunc {
 	const staleAfter = 5 * time.Minute

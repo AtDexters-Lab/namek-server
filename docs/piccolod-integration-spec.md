@@ -576,6 +576,7 @@ Get device info.
   "device_id": "550e8400-e29b-41d4-a716-446655440000",
   "hostname": "a1b2c3d4e5f6g7h8.example.com",
   "custom_hostname": "mydevice",
+  "alias_domains": ["app.example.com"],
   "status": "active",
   "identity_class": "hardware_tpm",
   "nexus_endpoints": ["wss://relay.example.com/connect"]
@@ -689,6 +690,131 @@ If `hostname` is omitted, the challenge targets the device's canonical hostname.
 |--------|---------|
 | 400 | Invalid digest format, or hostname not authorized |
 | 500 | DNS record creation failed |
+
+---
+
+### Alias domain endpoints (TPM-authenticated)
+
+All alias domain endpoints require TPM authentication headers and are rate-limited: 10 mutations/min and 30 reads/min per device.
+
+#### POST /api/v1/domains
+
+Register a new alias domain for the device's account.
+
+**Request:**
+```json
+{ "domain": "app.example.com" }
+```
+
+**Response:** `201 Created`
+```json
+{
+  "id": "<uuid>",
+  "domain": "app.example.com",
+  "status": "pending",
+  "cname_target": "a1b2c3d4e5f6g7h8.example.com",
+  "created_at": "2026-03-12T00:00:00Z"
+}
+```
+
+**Errors:**
+| Status | Meaning |
+|--------|---------|
+| 400 | Invalid domain format, baseDomain subdomain, or conflicts with domain under another account |
+| 409 | Domain already registered |
+| 429 | Rate limit exceeded |
+
+#### GET /api/v1/domains
+
+List all alias domains for the device's account.
+
+**Response:** `200 OK`
+```json
+{
+  "domains": [
+    {
+      "id": "<uuid>",
+      "domain": "app.example.com",
+      "status": "verified",
+      "cname_target": "a1b2c3d4e5f6g7h8.example.com",
+      "created_at": "2026-03-12T00:00:00Z",
+      "verified_at": "2026-03-12T00:05:00Z",
+      "assigned_devices": ["<uuid>"]
+    }
+  ]
+}
+```
+
+#### POST /api/v1/domains/:id/verify
+
+Trigger CNAME verification. The domain's CNAME must point to a `<slug>.baseDomain` where the slug belongs to a device under the same account.
+
+**Response:** `200 OK`
+```json
+{
+  "id": "<uuid>",
+  "domain": "app.example.com",
+  "status": "verified",
+  "verified_at": "2026-03-12T00:05:00Z"
+}
+```
+
+**Errors:**
+| Status | Meaning |
+|--------|---------|
+| 400 | CNAME not found, does not point to baseDomain, or slug not in this account |
+| 404 | Domain not found |
+
+#### DELETE /api/v1/domains/:id
+
+Delete an alias domain and all its device assignments.
+
+**Response:** `204 No Content`
+
+#### GET /api/v1/domains/:id/assignments
+
+List device assignments for a domain.
+
+**Response:** `200 OK`
+```json
+{
+  "assignments": [
+    { "device_id": "<uuid>", "domain": "app.example.com", "created_at": "2026-03-12T00:10:00Z" }
+  ]
+}
+```
+
+#### POST /api/v1/domains/:id/assignments
+
+Assign a verified domain to one or more devices. Additive — existing assignments are preserved.
+
+**Request:**
+```json
+{ "device_ids": ["<uuid>"] }
+```
+
+**Response:** `200 OK`
+```json
+{
+  "assignments": [
+    { "device_id": "<uuid>", "domain": "app.example.com", "created_at": "2026-03-12T00:10:00Z" }
+  ]
+}
+```
+
+**Errors:**
+| Status | Meaning |
+|--------|---------|
+| 400 | Domain not verified, or device not in same account |
+| 404 | Domain not found |
+
+#### DELETE /api/v1/domains/:id/assignments/:device_id
+
+Remove a device's assignment to a domain.
+
+**Response:** `204 No Content`
+
+---
 
 #### DELETE /api/v1/acme/challenges/:id
 

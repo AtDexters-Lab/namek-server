@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -28,48 +29,22 @@ func NewDeviceStore(pool *pgxpool.Pool) *DeviceStore {
 	return &DeviceStore{pool: pool}
 }
 
-func (s *DeviceStore) Create(ctx context.Context, d *model.Device) error {
-	_, err := s.pool.Exec(ctx, `
-		INSERT INTO devices (id, slug, hostname, custom_hostname, identity_class, ek_fingerprint, ak_public_key, ip_address, status)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-	`, d.ID, d.Slug, d.Hostname, d.CustomHostname, d.IdentityClass, d.EKFingerprint, d.AKPublicKey, ipToString(d.IPAddress), d.Status)
-	if err != nil {
-		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
-			switch pgErr.ConstraintName {
-			case "devices_hostname_key", "devices_custom_hostname_key":
-				return ErrDuplicateHostname
-			case "devices_slug_unique":
-				return ErrDuplicateSlug
-			default:
-				return ErrDuplicateEK
-			}
-		}
-		return fmt.Errorf("insert device: %w", err)
-	}
-	return nil
-}
-
-func (s *DeviceStore) GetByID(ctx context.Context, id uuid.UUID) (*model.Device, error) {
-	d := &model.Device{}
-	var ipAddr *string
-	err := s.pool.QueryRow(ctx, `
-		SELECT id, slug, hostname, custom_hostname, identity_class, ek_fingerprint, ak_public_key,
+const deviceColumns = `id, account_id, slug, hostname, custom_hostname, identity_class, ek_fingerprint, ak_public_key,
 		       ip_address::text, timezone, status,
 		       hostname_changes_this_year, hostname_year, last_hostname_change_at,
-		       created_at, last_seen_at
-		FROM devices WHERE id = $1
-	`, id).Scan(
-		&d.ID, &d.Slug, &d.Hostname, &d.CustomHostname, &d.IdentityClass, &d.EKFingerprint, &d.AKPublicKey,
+		       created_at, last_seen_at`
+
+func scanDevice(row pgx.Row) (*model.Device, error) {
+	d := &model.Device{}
+	var ipAddr *string
+	err := row.Scan(
+		&d.ID, &d.AccountID, &d.Slug, &d.Hostname, &d.CustomHostname, &d.IdentityClass, &d.EKFingerprint, &d.AKPublicKey,
 		&ipAddr, &d.Timezone, &d.Status,
 		&d.HostnameChangesThisYear, &d.HostnameYear, &d.LastHostnameChangeAt,
 		&d.CreatedAt, &d.LastSeenAt,
 	)
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, ErrDeviceNotFound
-		}
-		return nil, fmt.Errorf("get device by id: %w", err)
+		return nil, err
 	}
 	if ipAddr != nil {
 		d.IPAddress = net.ParseIP(*ipAddr)
@@ -77,29 +52,26 @@ func (s *DeviceStore) GetByID(ctx context.Context, id uuid.UUID) (*model.Device,
 	return d, nil
 }
 
+func (s *DeviceStore) GetByID(ctx context.Context, id uuid.UUID) (*model.Device, error) {
+	row := s.pool.QueryRow(ctx, `SELECT `+deviceColumns+` FROM devices WHERE id = $1`, id)
+	d, err := scanDevice(row)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrDeviceNotFound
+		}
+		return nil, fmt.Errorf("get device by id: %w", err)
+	}
+	return d, nil
+}
+
 func (s *DeviceStore) GetByEKFingerprint(ctx context.Context, fingerprint string) (*model.Device, error) {
-	d := &model.Device{}
-	var ipAddr *string
-	err := s.pool.QueryRow(ctx, `
-		SELECT id, slug, hostname, custom_hostname, identity_class, ek_fingerprint, ak_public_key,
-		       ip_address::text, timezone, status,
-		       hostname_changes_this_year, hostname_year, last_hostname_change_at,
-		       created_at, last_seen_at
-		FROM devices WHERE ek_fingerprint = $1
-	`, fingerprint).Scan(
-		&d.ID, &d.Slug, &d.Hostname, &d.CustomHostname, &d.IdentityClass, &d.EKFingerprint, &d.AKPublicKey,
-		&ipAddr, &d.Timezone, &d.Status,
-		&d.HostnameChangesThisYear, &d.HostnameYear, &d.LastHostnameChangeAt,
-		&d.CreatedAt, &d.LastSeenAt,
-	)
+	row := s.pool.QueryRow(ctx, `SELECT `+deviceColumns+` FROM devices WHERE ek_fingerprint = $1`, fingerprint)
+	d, err := scanDevice(row)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrDeviceNotFound
 		}
 		return nil, fmt.Errorf("get device by ek fingerprint: %w", err)
-	}
-	if ipAddr != nil {
-		d.IPAddress = net.ParseIP(*ipAddr)
 	}
 	return d, nil
 }
@@ -216,6 +188,18 @@ func (s *DeviceStore) UpdateStatus(ctx context.Context, id uuid.UUID, status mod
 	return nil
 }
 
+func (s *DeviceStore) GetBySlug(ctx context.Context, slug string) (*model.Device, error) {
+	row := s.pool.QueryRow(ctx, `SELECT `+deviceColumns+` FROM devices WHERE slug = $1`, slug)
+	d, err := scanDevice(row)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrDeviceNotFound
+		}
+		return nil, fmt.Errorf("get device by slug: %w", err)
+	}
+	return d, nil
+}
+
 func (s *DeviceStore) Delete(ctx context.Context, id uuid.UUID) error {
 	_, err := s.pool.Exec(ctx, `DELETE FROM devices WHERE id = $1`, id)
 	if err != nil {
@@ -241,4 +225,46 @@ func isDuplicateKeyError(err error) bool {
 		return pgErr.Code == "23505" // unique_violation
 	}
 	return strings.Contains(err.Error(), "duplicate key")
+}
+
+// CreateDeviceWithAccount creates an account and a device in a single transaction.
+func CreateDeviceWithAccount(ctx context.Context, pool *pgxpool.Pool, account *model.Account, device *model.Device) error {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	_, err = tx.Exec(ctx, `INSERT INTO accounts (id) VALUES ($1)`, account.ID)
+	if err != nil {
+		return fmt.Errorf("insert account: %w", err)
+	}
+
+	_, err = tx.Exec(ctx, `
+		INSERT INTO devices (id, account_id, slug, hostname, custom_hostname, identity_class, ek_fingerprint, ak_public_key, ip_address, status)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+	`, device.ID, device.AccountID, device.Slug, device.Hostname, device.CustomHostname,
+		device.IdentityClass, device.EKFingerprint, device.AKPublicKey,
+		ipToString(device.IPAddress), device.Status)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			switch pgErr.ConstraintName {
+			case "devices_hostname_key", "devices_custom_hostname_key":
+				return ErrDuplicateHostname
+			case "devices_slug_unique":
+				return ErrDuplicateSlug
+			default:
+				return ErrDuplicateEK
+			}
+		}
+		return fmt.Errorf("insert device: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit tx: %w", err)
+	}
+
+	account.CreatedAt = time.Now()
+	return nil
 }
