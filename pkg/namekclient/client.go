@@ -207,9 +207,6 @@ func (c *Client) SetHostname(ctx context.Context, hostname string) error {
 		return err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return readError(resp)
-	}
 	return nil
 }
 
@@ -255,9 +252,6 @@ func (c *Client) DeleteACMEChallenge(ctx context.Context, id string) error {
 		return err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
-		return readError(resp)
-	}
 	return nil
 }
 

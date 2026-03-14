@@ -710,10 +710,12 @@ Register a new alias domain for the device's account.
 ```json
 {
   "id": "<uuid>",
+  "account_id": "<uuid>",
   "domain": "app.example.com",
   "status": "pending",
   "cname_target": "a1b2c3d4e5f6g7h8.example.com",
-  "created_at": "2026-03-12T00:00:00Z"
+  "created_at": "2026-03-12T00:00:00Z",
+  "expires_at": "2026-03-19T00:00:00Z"
 }
 ```
 
@@ -734,6 +736,7 @@ List all alias domains for the device's account.
   "domains": [
     {
       "id": "<uuid>",
+      "account_id": "<uuid>",
       "domain": "app.example.com",
       "status": "verified",
       "cname_target": "a1b2c3d4e5f6g7h8.example.com",
