@@ -17,6 +17,28 @@ type DeviceInfo struct {
 	Status         string   `json:"status"`
 	IdentityClass  string   `json:"identity_class"`
 	NexusEndpoints []string `json:"nexus_endpoints"`
+	AliasDomains   []string `json:"alias_domains,omitempty"`
+}
+
+// DomainInfo represents an alias domain registered with the namek server.
+type DomainInfo struct {
+	ID                 string   `json:"id"`
+	AccountID          string   `json:"account_id"`
+	Domain             string   `json:"domain"`
+	Status             string   `json:"status"` // "pending" or "verified"
+	CNAMETarget        string   `json:"cname_target"`
+	AssignedDevices    []string `json:"assigned_devices,omitempty"`
+	CreatedAt          string   `json:"created_at"`
+	ExpiresAt          string   `json:"expires_at,omitempty"`
+	VerifiedAt         string   `json:"verified_at,omitempty"`
+	VerifiedByDeviceID string   `json:"verified_by_device_id,omitempty"`
+}
+
+// DomainAssignment represents a device-to-domain assignment.
+type DomainAssignment struct {
+	DeviceID  string `json:"device_id"`
+	Domain    string `json:"domain"`
+	CreatedAt string `json:"created_at"`
 }
 
 // ChallengeResult is returned from POST /acme/challenges.

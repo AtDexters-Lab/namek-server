@@ -261,6 +261,104 @@ func (c *Client) DeleteACMEChallenge(ctx context.Context, id string) error {
 	return nil
 }
 
+// RegisterDomain calls POST /api/v1/domains (authenticated).
+func (c *Client) RegisterDomain(ctx context.Context, domain string) (*DomainInfo, error) {
+	body := map[string]string{"domain": domain}
+	resp, err := c.doAuthenticated(ctx, http.MethodPost, "/api/v1/domains", body)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	var info DomainInfo
+	if err := decodeResponse(resp, &info); err != nil {
+		return nil, err
+	}
+	return &info, nil
+}
+
+// VerifyDomain calls POST /api/v1/domains/:id/verify (authenticated).
+func (c *Client) VerifyDomain(ctx context.Context, domainID string) (*DomainInfo, error) {
+	resp, err := c.doAuthenticated(ctx, http.MethodPost, "/api/v1/domains/"+domainID+"/verify", nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	var info DomainInfo
+	if err := decodeResponse(resp, &info); err != nil {
+		return nil, err
+	}
+	return &info, nil
+}
+
+// AssignDomain calls POST /api/v1/domains/:id/assignments (authenticated).
+func (c *Client) AssignDomain(ctx context.Context, domainID string, deviceIDs []string) ([]DomainAssignment, error) {
+	body := map[string]any{"device_ids": deviceIDs}
+	resp, err := c.doAuthenticated(ctx, http.MethodPost, "/api/v1/domains/"+domainID+"/assignments", body)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	var result struct {
+		Assignments []DomainAssignment `json:"assignments"`
+	}
+	if err := decodeResponse(resp, &result); err != nil {
+		return nil, err
+	}
+	return result.Assignments, nil
+}
+
+// UnassignDomain calls DELETE /api/v1/domains/:id/assignments/:device_id (authenticated).
+func (c *Client) UnassignDomain(ctx context.Context, domainID, deviceID string) error {
+	resp, err := c.doAuthenticated(ctx, http.MethodDelete, "/api/v1/domains/"+domainID+"/assignments/"+deviceID, nil)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	return nil
+}
+
+// DeleteDomain calls DELETE /api/v1/domains/:id (authenticated).
+func (c *Client) DeleteDomain(ctx context.Context, domainID string) error {
+	resp, err := c.doAuthenticated(ctx, http.MethodDelete, "/api/v1/domains/"+domainID, nil)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	return nil
+}
+
+// ListAssignments calls GET /api/v1/domains/:id/assignments (authenticated).
+func (c *Client) ListAssignments(ctx context.Context, domainID string) ([]DomainAssignment, error) {
+	resp, err := c.doAuthenticated(ctx, http.MethodGet, "/api/v1/domains/"+domainID+"/assignments", nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	var result struct {
+		Assignments []DomainAssignment `json:"assignments"`
+	}
+	if err := decodeResponse(resp, &result); err != nil {
+		return nil, err
+	}
+	return result.Assignments, nil
+}
+
+// ListDomains calls GET /api/v1/domains (authenticated).
+func (c *Client) ListDomains(ctx context.Context) ([]DomainInfo, error) {
+	resp, err := c.doAuthenticated(ctx, http.MethodGet, "/api/v1/domains", nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	var result struct {
+		Domains []DomainInfo `json:"domains"`
+	}
+	if err := decodeResponse(resp, &result); err != nil {
+		return nil, err
+	}
+	return result.Domains, nil
+}
+
 // VerifyToken calls POST /api/v1/tokens/verify (no auth).
 func (c *Client) VerifyToken(ctx context.Context, token string) (*VerifyResult, error) {
 	body := map[string]string{"token": token}
