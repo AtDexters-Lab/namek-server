@@ -1,19 +1,18 @@
-#!/bin/sh
+#!/bin/bash
 set -eu
 
 # Validate required environment variables
 for var in PDNS_DB_HOST PDNS_DB_PORT PDNS_DB_USER PDNS_DB_PASSWORD PDNS_API_KEY; do
-  eval val=\$$var
-  if [ -z "$val" ]; then
+  if [ -z "${!var}" ]; then
     echo "FATAL: $var is not set"
     exit 1
   fi
 done
 
-# Wait for postgres to be ready
+# Wait for postgres to be ready (bash /dev/tcp — no nc dependency)
 TIMEOUT=120
 ELAPSED=0
-until nc -z "${PDNS_DB_HOST}" "${PDNS_DB_PORT}" 2>/dev/null; do
+until (: >/dev/tcp/"${PDNS_DB_HOST}"/"${PDNS_DB_PORT}") 2>/dev/null; do
   ELAPSED=$((ELAPSED + 1))
   if [ "$ELAPSED" -ge "$TIMEOUT" ]; then
     echo "FATAL: postgres not reachable at ${PDNS_DB_HOST}:${PDNS_DB_PORT} after ${TIMEOUT}s"
