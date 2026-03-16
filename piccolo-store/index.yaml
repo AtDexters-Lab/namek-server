@@ -1,5 +1,0 @@
-apps:
-  - name: namek
-    path: apps/namek/app.yaml
-    description: Piccolo OS control plane — device auth, DNS, and token issuance
-    type: system
