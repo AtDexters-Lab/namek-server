@@ -80,6 +80,8 @@ jobs:
           file: Containerfile
           platforms: linux/amd64,linux/arm64
           push: true
+          cache-from: type=gha,scope=namek-server
+          cache-to: type=gha,mode=max,scope=namek-server
           build-args: |
             VERSION=${{ github.sha }}
           tags: |
@@ -93,6 +95,8 @@ jobs:
           file: docker/postgres/Containerfile
           platforms: linux/amd64,linux/arm64
           push: true
+          cache-from: type=gha,scope=namek-postgres
+          cache-to: type=gha,mode=max,scope=namek-postgres
           tags: |
             ghcr.io/atdexters-lab/namek-postgres:latest
             ghcr.io/atdexters-lab/namek-postgres:${{ github.sha }}
@@ -104,6 +108,8 @@ jobs:
           file: docker/powerdns/Containerfile
           platforms: linux/amd64,linux/arm64
           push: true
+          cache-from: type=gha,scope=namek-powerdns
+          cache-to: type=gha,mode=max,scope=namek-powerdns
           tags: |
             ghcr.io/atdexters-lab/namek-powerdns:latest
             ghcr.io/atdexters-lab/namek-powerdns:${{ github.sha }}
