@@ -1,0 +1,11 @@
+FROM alpine:3.21
+
+ARG TARGETARCH
+
+RUN apk add --no-cache ca-certificates tzdata && \
+    mkdir -p /etc/namek/tpm-ca/hardware
+
+COPY --chmod=0755 namek-linux-${TARGETARCH} /namek
+
+EXPOSE 53 443
+ENTRYPOINT ["/namek", "-config", "/piccolo/config/app.yaml"]
