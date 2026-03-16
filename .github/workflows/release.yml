@@ -48,7 +48,7 @@ jobs:
         run: |
           go build -ldflags "-s -w -X main.version=${{ github.sha }}" -o namek-${{ matrix.goos }}-${{ matrix.goarch }} ./cmd/namek/
 
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v6
         with:
           name: namek-${{ matrix.goos }}-${{ matrix.goarch }}
           path: namek-${{ matrix.goos }}-${{ matrix.goarch }}
@@ -63,7 +63,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v6
         with:
           pattern: namek-linux-*
           merge-multiple: true
