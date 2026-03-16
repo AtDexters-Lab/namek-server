@@ -172,6 +172,101 @@ func (c *PowerDNSClient) patchRRSets(ctx context.Context, zone string, rrsets []
 	return nil
 }
 
+// GetZone checks if a zone exists in PowerDNS. Returns true if it exists.
+func (c *PowerDNSClient) GetZone(ctx context.Context, zone string) (bool, error) {
+	url := fmt.Sprintf("%s/api/v1/servers/%s/zones/%s", c.apiURL, c.serverID, zone)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return false, fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("X-API-Key", c.apiKey)
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return false, fmt.Errorf("powerdns api request: %w", err)
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body)
+
+	if resp.StatusCode == http.StatusNotFound {
+		return false, nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		return false, fmt.Errorf("powerdns api returned status %d", resp.StatusCode)
+	}
+	return true, nil
+}
+
+type createZoneRequest struct {
+	Name        string   `json:"name"`
+	Kind        string   `json:"kind"`
+	Nameservers []string `json:"nameservers"`
+	RRSets      []RRSet  `json:"rrsets"`
+}
+
+// CreateZone creates a new zone with SOA, NS, and wildcard CNAME records.
+// Returns nil if the zone already exists (409 Conflict).
+func (c *PowerDNSClient) CreateZone(ctx context.Context, zone, baseDomain, relayHostname string) error {
+	body := createZoneRequest{
+		Name:        zone,
+		Kind:        "Native",
+		Nameservers: []string{},
+		RRSets: []RRSet{
+			{
+				Name: zone,
+				Type: "SOA",
+				TTL:  86400,
+				Records: []Record{{
+					Content: fmt.Sprintf("%s %s 1 10800 3600 604800 300", ensureDot("ns1."+baseDomain), ensureDot("admin."+baseDomain)),
+				}},
+			},
+			{
+				Name:    zone,
+				Type:    "NS",
+				TTL:     86400,
+				Records: []Record{{Content: ensureDot("ns1." + baseDomain)}},
+			},
+			{
+				Name:    ensureDot(fmt.Sprintf("*.%s", baseDomain)),
+				Type:    "CNAME",
+				TTL:     300,
+				Records: []Record{{Content: ensureDot(relayHostname)}},
+			},
+		},
+	}
+
+	data, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("marshal zone: %w", err)
+	}
+
+	url := fmt.Sprintf("%s/api/v1/servers/%s/zones", c.apiURL, c.serverID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(data))
+	if err != nil {
+		return fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("X-API-Key", c.apiKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("powerdns api request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusConflict {
+		io.Copy(io.Discard, resp.Body)
+		return nil
+	}
+	if resp.StatusCode >= 400 {
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
+		return fmt.Errorf("powerdns create zone returned status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	io.Copy(io.Discard, resp.Body)
+	return nil
+}
+
 func ensureDot(name string) string {
 	if len(name) > 0 && name[len(name)-1] != '.' {
 		return name + "."

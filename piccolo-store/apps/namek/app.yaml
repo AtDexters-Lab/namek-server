@@ -1,0 +1,105 @@
+name: namek
+description: Piccolo OS control plane — device auth, DNS, and token issuance
+type: system
+primary_service: namek
+
+x-piccolo:
+  mode: service
+
+inputs:
+  __app_address__:
+    type: string
+    required: true
+    regex: "^[a-z][a-z0-9]{0,15}$"
+  db_password:
+    type: password
+    generated: true
+  pdns_db_password:
+    type: password
+    generated: true
+  pdns_api_key:
+    type: password
+    generated: true
+  base_domain:
+    type: string
+    default: "namek-dev.atdexters.com"
+
+services:
+  postgres:
+    image: ghcr.io/atdexters-lab/namek-postgres:latest
+    bind_ports: [5432]
+    env:
+      POSTGRES_USER: namek
+      POSTGRES_PASSWORD: "{{ .Inputs.db_password }}"
+      POSTGRES_DB: namek
+      PDNS_PASSWORD: "{{ .Inputs.pdns_db_password }}"
+    storage:
+      pgdata:
+        path: /var/lib/postgresql/data
+        persistent: true
+    resources:
+      memory: 512M
+      cpu: "1"
+
+  powerdns:
+    image: ghcr.io/atdexters-lab/namek-powerdns:latest
+    bind_ports: [5353, 8081]
+    after: [postgres]
+    env:
+      PDNS_DB_HOST: "127.0.0.1"
+      PDNS_DB_PORT: "5432"
+      PDNS_DB_USER: pdns
+      PDNS_DB_PASSWORD: "{{ .Inputs.pdns_db_password }}"
+      PDNS_API_KEY: "{{ .Inputs.pdns_api_key }}"
+      PDNS_LOCAL_PORT: "5353"
+    resources:
+      memory: 256M
+      cpu: "0.5"
+
+  namek:
+    image: ghcr.io/atdexters-lab/namek-server:latest
+    bind_ports: [443, 53]
+    after: [postgres, powerdns]
+    resources:
+      memory: 256M
+      cpu: "1"
+
+listeners:
+  __primary:
+    guest_port: 443
+    flow: tls
+    protocol: raw
+  dns:
+    guest_port: 53
+    flow: udp
+    protocol: raw
+    port_claim: 53
+  dnstcp:
+    guest_port: 53
+    flow: tcp
+    protocol: raw
+    port_claim: 53
+
+permissions:
+  network.internet: allow
+  network.dns: allow
+  filesystem.read_only_root: false
+
+app_config:
+  publicHostname: "{{ .Inputs.base_domain }}"
+  listenAddress: ":443"
+  database:
+    url: "postgres://namek:{{ .Inputs.db_password }}@127.0.0.1:5432/namek?sslmode=disable"
+  dns:
+    baseDomain: "{{ .Inputs.base_domain }}"
+    zone: "{{ .Inputs.base_domain }}."
+    relayHostname: "relay.{{ .Inputs.base_domain }}"
+  powerDNS:
+    apiURL: "http://127.0.0.1:8081"
+    apiKey: "{{ .Inputs.pdns_api_key }}"
+    dnsAddress: "127.0.0.1:5353"
+  tpm:
+    softwareCACertsDir: "/etc/namek/tpm-ca/software"
+  nexus:
+    trustedDomainSuffixes:
+      - ".nexus.{{ .Inputs.base_domain }}"

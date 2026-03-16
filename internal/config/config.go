@@ -10,7 +10,6 @@ import (
 
 type Config struct {
 	PublicHostname   string `yaml:"publicHostname"`
-	AcmeCacheDir     string `yaml:"acmeCacheDir"`
 	AcmeDirectoryURL string `yaml:"acmeDirectoryURL"`
 	AcmeCACert       string `yaml:"acmeCACert"`
 	ListenAddress    string `yaml:"listenAddress"`
@@ -46,6 +45,7 @@ type PowerDNSConfig struct {
 	ApiKey         string `yaml:"apiKey"`
 	ServerID       string `yaml:"serverID"`
 	TimeoutSeconds int    `yaml:"timeoutSeconds"`
+	DNSAddress     string `yaml:"dnsAddress"`
 }
 
 func (c PowerDNSConfig) Timeout() time.Duration {
@@ -120,11 +120,8 @@ func (c *Config) applyDefaults() {
 	if c.ListenAddress == "" {
 		c.ListenAddress = ":443"
 	}
-	if c.HTTPAddress == "" {
-		c.HTTPAddress = ":80"
-	}
-	if c.AcmeCacheDir == "" {
-		c.AcmeCacheDir = "acme_certs"
+	if c.PowerDNS.DNSAddress == "" {
+		c.PowerDNS.DNSAddress = "127.0.0.1:53"
 	}
 	if c.Database.MaxOpenConns == 0 {
 		c.Database.MaxOpenConns = 25

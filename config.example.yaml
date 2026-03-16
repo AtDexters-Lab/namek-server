@@ -1,8 +1,7 @@
-# Namek auto-obtains TLS via Let's Encrypt HTTP-01
+# Namek auto-obtains TLS via Let's Encrypt
 publicHostname: "namek.piccolospace.com"
-acmeCacheDir: "/var/lib/namek/acme_certs"
 listenAddress: ":443"
-httpAddress: ":80"
+httpAddress: ":80"  # omit to disable HTTP listener (e.g. Piccolo deployment uses TLS-ALPN-01 only)
 
 database:
   url: "postgres://namek:password@localhost:5432/namek?sslmode=disable"
@@ -19,6 +18,7 @@ powerDNS:
   apiKey: "pdns-api-key"
   serverID: "localhost"
   timeoutSeconds: 10
+  # dnsAddress: "127.0.0.1:5353"  # set when PowerDNS listens on non-standard port (enables DNS proxy on :53)
 
 tpm:
   trustedCACertsDir: ""

@@ -20,6 +20,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/crypto/acme"
 	"golang.org/x/crypto/acme/autocert"
 
@@ -56,11 +57,32 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Database
-	pool, err := db.NewPool(ctx, cfg.Database, logger)
-	if err != nil {
-		logger.Error("failed to connect to database", "error", err)
-		os.Exit(1)
+	// Database (retry with backoff — Postgres may not be ready in container environments)
+	var pool *pgxpool.Pool
+	{
+		backoff := time.Second
+		deadline := time.Now().Add(30 * time.Second)
+		for {
+			pool, err = db.NewPool(ctx, cfg.Database, logger)
+			if err == nil {
+				break
+			}
+			if time.Now().After(deadline) {
+				logger.Error("failed to connect to database", "error", err)
+				os.Exit(1)
+			}
+			logger.Info("database not ready, retrying", "error", err, "backoff", backoff)
+			select {
+			case <-ctx.Done():
+				logger.Error("context cancelled while waiting for database")
+				os.Exit(1)
+			case <-time.After(backoff):
+			}
+			backoff *= 2
+			if backoff > 5*time.Second {
+				backoff = 5 * time.Second
+			}
+		}
 	}
 	defer pool.Close()
 
@@ -74,6 +96,12 @@ func main() {
 
 	// PowerDNS client
 	pdns := dns.NewPowerDNSClient(cfg.PowerDNS, logger)
+
+	// Bootstrap DNS zone (retries until PowerDNS is ready)
+	if err := dns.BootstrapZone(ctx, pdns, cfg.DNS, logger); err != nil {
+		logger.Error("failed to bootstrap dns zone", "error", err)
+		os.Exit(1)
+	}
 
 	// Nonce store
 	nonceStore := auth.NewNonceStore(logger)
@@ -186,15 +214,10 @@ func main() {
 	})
 
 	// Autocert setup
-	if err := os.MkdirAll(cfg.AcmeCacheDir, 0700); err != nil {
-		logger.Error("failed to create acme cache dir", "error", err, "dir", cfg.AcmeCacheDir)
-		os.Exit(1)
-	}
-
 	certManager := &autocert.Manager{
 		Prompt:     autocert.AcceptTOS,
 		HostPolicy: autocert.HostWhitelist(cfg.PublicHostname),
-		Cache:      autocert.DirCache(cfg.AcmeCacheDir),
+		Cache:      db.NewPGCertStore(pool),
 	}
 
 	if cfg.AcmeDirectoryURL != "" {
@@ -260,12 +283,25 @@ func main() {
 		}
 	}()
 
-	// HTTP server (HTTP-01 challenges only)
-	httpServer := &http.Server{
-		Addr:              cfg.HTTPAddress,
-		Handler:           certManager.HTTPHandler(nil),
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       10 * time.Second,
+	// DNS proxy (when PowerDNS listens on a different port than :53)
+	var dnsProxy *dns.Proxy
+	if cfg.PowerDNS.DNSAddress != "127.0.0.1:53" && cfg.PowerDNS.DNSAddress != ":53" {
+		dnsProxy = dns.NewProxy(":53", cfg.PowerDNS.DNSAddress, logger)
+		if err := dnsProxy.Start(ctx); err != nil {
+			logger.Error("failed to start dns proxy", "error", err)
+			os.Exit(1)
+		}
+	}
+
+	// HTTP server (HTTP-01 challenges — only when httpAddress is configured)
+	var httpServer *http.Server
+	if cfg.HTTPAddress != "" {
+		httpServer = &http.Server{
+			Addr:              cfg.HTTPAddress,
+			Handler:           certManager.HTTPHandler(nil),
+			ReadHeaderTimeout: 5 * time.Second,
+			ReadTimeout:       10 * time.Second,
+		}
 	}
 
 	// HTTPS server
@@ -281,10 +317,12 @@ func main() {
 
 	// Start servers
 	errCh := make(chan error, 2)
-	go func() {
-		logger.Info("starting HTTP server", "addr", cfg.HTTPAddress)
-		errCh <- httpServer.ListenAndServe()
-	}()
+	if httpServer != nil {
+		go func() {
+			logger.Info("starting HTTP server", "addr", cfg.HTTPAddress)
+			errCh <- httpServer.ListenAndServe()
+		}()
+	}
 	go func() {
 		logger.Info("starting HTTPS server", "addr", cfg.ListenAddress)
 		errCh <- httpsServer.ListenAndServeTLS("", "")
@@ -308,11 +346,16 @@ func main() {
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer shutdownCancel()
 
+	if dnsProxy != nil {
+		dnsProxy.Close()
+	}
 	if err := httpsServer.Shutdown(shutdownCtx); err != nil {
 		logger.Error("https server shutdown error", "error", err)
 	}
-	if err := httpServer.Shutdown(shutdownCtx); err != nil {
-		logger.Error("http server shutdown error", "error", err)
+	if httpServer != nil {
+		if err := httpServer.Shutdown(shutdownCtx); err != nil {
+			logger.Error("http server shutdown error", "error", err)
+		}
 	}
 
 	logger.Info("shutdown complete")

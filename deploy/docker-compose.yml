@@ -31,14 +31,13 @@ services:
   namek:
     build:
       context: ..
-      dockerfile: Dockerfile
+      dockerfile: Containerfile
     depends_on:
       postgres:
         condition: service_healthy
       powerdns:
         condition: service_started
     volumes:
-      - acme_certs:/var/lib/namek/acme_certs
       - ./config.yaml:/etc/namek/config.yaml:ro
     ports:
       - "80:80"
@@ -47,4 +46,3 @@ services:
 
 volumes:
   pgdata:
-  acme_certs:

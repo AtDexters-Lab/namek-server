@@ -8,7 +8,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const currentVersion = 1
+const currentVersion = 2
 
 var migrations = []string{
 	// Version 1: Initial schema
@@ -102,6 +102,13 @@ var migrations = []string{
 	);
 
 	CREATE INDEX IF NOT EXISTS idx_device_domain_assignments_domain_id ON device_domain_assignments(domain_id);`,
+
+	// Version 2: ACME certificate cache
+	`CREATE TABLE IF NOT EXISTS acme_certs (
+		key        TEXT PRIMARY KEY,
+		data       BYTEA NOT NULL,
+		updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	);`,
 }
 
 func Migrate(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger) error {
