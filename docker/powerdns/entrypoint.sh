@@ -40,7 +40,6 @@ webserver-address=127.0.0.1
 webserver-port=8081
 webserver-allow-from=127.0.0.0/8
 
-strict-rfc-wildcards=no
 enable-lua-records=yes
 
 setuid=
