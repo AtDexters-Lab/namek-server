@@ -22,29 +22,31 @@ import (
 )
 
 type realVerifier struct {
-	hardwareCAs *x509.CertPool
-	softwareCAs *x509.CertPool
-	logger      *slog.Logger
+	hardwareCAs      *x509.CertPool
+	allowSoftwareTPM bool
+	logger           *slog.Logger
 }
 
 func NewVerifier(cfg config.TPMConfig, logger *slog.Logger) (Verifier, error) {
 	v := &realVerifier{
-		hardwareCAs: x509.NewCertPool(),
-		softwareCAs: x509.NewCertPool(),
-		logger:      logger,
+		hardwareCAs:      x509.NewCertPool(),
+		allowSoftwareTPM: cfg.AllowSoftwareTPM,
+		logger:           logger,
 	}
 
 	loaded := 0
 	if cfg.TrustedCACertsDir != "" {
 		loaded += v.loadCertsFromDir(cfg.TrustedCACertsDir, v.hardwareCAs, "hardware")
 	}
-	if cfg.SoftwareCACertsDir != "" {
-		loaded += v.loadCertsFromDir(cfg.SoftwareCACertsDir, v.softwareCAs, "software")
+
+	if loaded == 0 && !cfg.AllowSoftwareTPM {
+		return nil, fmt.Errorf("no TPM CA certificates loaded and allowSoftwareTPM is false: configure tpm.trustedCACertsDir or set tpm.allowSoftwareTPM")
 	}
 
-	if loaded == 0 {
-		return nil, fmt.Errorf("no TPM CA certificates loaded: configure tpm.trustedCACertsDir and/or tpm.softwareCACertsDir")
+	if cfg.AllowSoftwareTPM {
+		logger.Warn("allowSoftwareTPM is enabled: any EK certificate will be accepted as software_tpm without CA verification")
 	}
+	logger.Info("tpm verifier initialized", "hardwareCAs", loaded, "allowSoftwareTPM", cfg.AllowSoftwareTPM)
 	return v, nil
 }
 
@@ -81,12 +83,12 @@ func (v *realVerifier) VerifyEKCert(ekCertDER []byte) (string, crypto.PublicKey,
 		return IdentityClassHardwareTPM, cert.PublicKey, nil
 	}
 
-	// Try software CA pool
-	if _, err := cert.Verify(ekVerifyOpts(v.softwareCAs)); err == nil {
+	// If software TPM is allowed, accept any EK that didn't match hardware CAs
+	if v.allowSoftwareTPM {
 		return IdentityClassSoftwareTPM, cert.PublicKey, nil
 	}
 
-	return "", nil, fmt.Errorf("EK cert not trusted by any CA pool")
+	return "", nil, fmt.Errorf("EK cert not trusted by any hardware CA")
 }
 
 const (

@@ -17,7 +17,7 @@ powerDNS:
   apiKey: "pdns-dev-key"
 
 tpm:
-  softwareCACertsDir: ".local/swtpm/localca"
+  allowSoftwareTPM: true
   trustedCACertsDir: ""
 
 nexus:

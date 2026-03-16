@@ -48,7 +48,7 @@ const (
 )
 ```
 
-**Existing config migration:** `SeedBundleDir` supplements the existing `TrustedCACertsDir`. Both are loaded into the same hardware CA pool. `TrustedCACertsDir` allows operators to add their own trusted CAs (e.g., for enterprise-provisioned TPMs). `SoftwareCACertsDir` continues to serve the swtpm CA pool unchanged.
+**Existing config migration:** `SeedBundleDir` supplements the existing `TrustedCACertsDir`. Both are loaded into the same hardware CA pool. `TrustedCACertsDir` allows operators to add their own trusted CAs (e.g., for enterprise-provisioned TPMs). `AllowSoftwareTPM` (boolean) controls whether unverified EK certs are accepted as Tier 4 software devices.
 
 ## Structural Analysis of Unknown CAs
 
@@ -248,7 +248,7 @@ type FleetTrustConfig struct {
 }
 ```
 
-**Existing config migration:** `SeedBundleDir` supplements `TrustedCACertsDir`. Both load into the same hardware CA pool. `TrustedCACertsDir` remains for operator-supplied CAs. `SoftwareCACertsDir` unchanged.
+**Existing config migration:** `SeedBundleDir` supplements `TrustedCACertsDir`. Both load into the same hardware CA pool. `TrustedCACertsDir` remains for operator-supplied CAs. `AllowSoftwareTPM` (boolean) controls Tier 4 acceptance.
 
 ## Census API Authentication
 

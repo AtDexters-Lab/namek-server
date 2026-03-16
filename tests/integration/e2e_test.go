@@ -37,9 +37,8 @@ func TestFullFlow(t *testing.T) {
 	require.NoError(t, err, "clean DB")
 	conn.Close(ctx)
 
-	// Use the well-known swtpm state dir that matches config.dev.yaml's
-	// tpm.softwareCACertsDir (.local/swtpm/localca). This ensures the
-	// separately-running namek server trusts this swtpm's EK certificates.
+	// Use the well-known swtpm state dir. The separately-running namek
+	// server accepts software TPMs when tpm.allowSoftwareTPM is true.
 	rootDir, err := filepath.Abs("../..")
 	require.NoError(t, err)
 	stateDir := filepath.Join(rootDir, ".local", "swtpm")

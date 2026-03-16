@@ -22,7 +22,7 @@ powerDNS:
 
 tpm:
   trustedCACertsDir: ""
-  softwareCACertsDir: ""
+  allowSoftwareTPM: false
 
 nexus:
   trustedDomainSuffixes:

@@ -105,7 +105,6 @@ func (p *Process) Addr() string {
 }
 
 // CACertDir returns the path containing swtpm's local CA certificates.
-// These certs must be trusted by namek-server's softwareCACertsDir.
 func (p *Process) CACertDir() string {
 	// The localca config directs CA output to stateDir/localca/
 	return filepath.Join(p.stateDir, "localca")

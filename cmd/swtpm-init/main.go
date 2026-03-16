@@ -1,6 +1,6 @@
 // swtpm-init initializes software TPM state and CA certificates.
-// Used by `make dev-deps` to prepare the swtpm CA certs that
-// namek-server needs in its softwareCACertsDir config.
+// Used by `make dev-deps` to prepare the swtpm environment.
+// namek-server accepts software TPMs when tpm.allowSoftwareTPM is true.
 package main
 
 import (

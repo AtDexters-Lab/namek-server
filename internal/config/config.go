@@ -56,8 +56,8 @@ func (c PowerDNSConfig) Timeout() time.Duration {
 }
 
 type TPMConfig struct {
-	TrustedCACertsDir  string `yaml:"trustedCACertsDir"`
-	SoftwareCACertsDir string `yaml:"softwareCACertsDir"`
+	TrustedCACertsDir string `yaml:"trustedCACertsDir"`
+	AllowSoftwareTPM  bool   `yaml:"allowSoftwareTPM"`
 }
 
 type NexusConfig struct {
