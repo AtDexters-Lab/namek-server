@@ -18,5 +18,5 @@ RUN apk add --no-cache ca-certificates tzdata && \
 
 COPY --from=builder /namek /namek
 
-EXPOSE 53 443
+EXPOSE 53 443 8056
 ENTRYPOINT ["/namek", "-config", "/piccolo/config/app.yaml"]

@@ -42,6 +42,7 @@ services:
     ports:
       - "80:80"
       - "443:443"
+      - "8056:8056"
     command: ["/namek", "-config", "/etc/namek/config.yaml"]
 
 volumes:

@@ -14,6 +14,7 @@ type Config struct {
 	AcmeCACert       string `yaml:"acmeCACert"`
 	ListenAddress    string `yaml:"listenAddress"`
 	HTTPAddress      string `yaml:"httpAddress"`
+	AdminAddress     string `yaml:"adminAddress"`
 
 	Database   DatabaseConfig `yaml:"database"`
 	DNS        DNSConfig      `yaml:"dns"`

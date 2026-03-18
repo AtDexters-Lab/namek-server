@@ -1,6 +1,7 @@
 publicHostname: "localhost"
 listenAddress: ":8443"
 httpAddress: ":8080"
+adminAddress: ":8056"
 acmeDirectoryURL: "https://localhost:14000/dir"
 acmeCACert: "deploy/pebble/pebble.minica.pem"
 
