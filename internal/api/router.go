@@ -107,22 +107,31 @@ func NewRouter(deps RouterDeps) http.Handler {
 		}
 	}
 
-	// Load Nexus client CA if configured. On any failure, leave clientCAs nil
-	// so NexusAuth treats it as "not configured" rather than rejecting all clients
-	// with an empty trust pool.
+	// Load Nexus client CA: explicit file if configured, otherwise system cert pool.
+	// When an explicit file is set but fails to load, clientCAs stays nil (503 on
+	// registration) — this surfaces the misconfiguration instead of silently falling
+	// back to the system pool.
 	var clientCAs *x509.CertPool
 	if deps.Config.Nexus.ClientCACertFile != "" {
 		data, err := os.ReadFile(deps.Config.Nexus.ClientCACertFile)
 		if err != nil {
-			deps.Logger.Error("failed to read nexus client ca cert, mTLS disabled", "error", err)
+			deps.Logger.Error("failed to read nexus client ca cert, nexus registration will be rejected", "error", err)
 		} else {
 			pool := x509.NewCertPool()
 			if pool.AppendCertsFromPEM(data) {
 				clientCAs = pool
 			} else {
-				deps.Logger.Error("nexus client ca cert contains no valid PEM blocks, mTLS disabled",
+				deps.Logger.Error("nexus client ca cert contains no valid PEM blocks, nexus registration will be rejected",
 					"file", deps.Config.Nexus.ClientCACertFile)
 			}
+		}
+	} else {
+		systemPool, err := x509.SystemCertPool()
+		if err != nil {
+			deps.Logger.Error("failed to load system cert pool, nexus mTLS disabled", "error", err)
+		} else {
+			clientCAs = systemPool
+			deps.Logger.Warn("nexus client CA: using system cert pool (no clientCACertFile configured)")
 		}
 	}
 
