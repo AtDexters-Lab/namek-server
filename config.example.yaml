@@ -2,6 +2,7 @@
 publicHostname: "namek.piccolospace.com"
 listenAddress: ":443"
 httpAddress: ":80"  # omit to disable HTTP listener (e.g. Piccolo deployment uses TLS-ALPN-01 only)
+adminAddress: ":8056"  # omit to disable PowerDNS admin UI
 
 database:
   url: "postgres://namek:password@localhost:5432/namek?sslmode=disable"

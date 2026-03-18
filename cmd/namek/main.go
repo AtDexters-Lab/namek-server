@@ -24,6 +24,7 @@ import (
 	"golang.org/x/crypto/acme"
 	"golang.org/x/crypto/acme/autocert"
 
+	"github.com/AtDexters-Lab/namek-server/internal/admin"
 	"github.com/AtDexters-Lab/namek-server/internal/api"
 	"github.com/AtDexters-Lab/namek-server/internal/auth"
 	"github.com/AtDexters-Lab/namek-server/internal/config"
@@ -304,6 +305,24 @@ func main() {
 		}
 	}
 
+	// Admin server (PowerDNS web UI + API proxy)
+	var adminServer *http.Server
+	if cfg.AdminAddress != "" {
+		adminHandler, err := admin.NewHandler(cfg.PowerDNS.ApiURL, cfg.PowerDNS.ApiKey, logger)
+		if err != nil {
+			logger.Error("failed to create admin handler", "error", err)
+			os.Exit(1)
+		}
+		adminServer = &http.Server{
+			Addr:              cfg.AdminAddress,
+			Handler:           adminHandler,
+			ReadHeaderTimeout: 5 * time.Second,
+			ReadTimeout:       10 * time.Second,
+			WriteTimeout:      30 * time.Second,
+			IdleTimeout:       120 * time.Second,
+		}
+	}
+
 	// HTTPS server
 	httpsServer := &http.Server{
 		Addr:              cfg.ListenAddress,
@@ -316,11 +335,17 @@ func main() {
 	}
 
 	// Start servers
-	errCh := make(chan error, 2)
+	errCh := make(chan error, 3) // httpServer + httpsServer + adminServer
 	if httpServer != nil {
 		go func() {
 			logger.Info("starting HTTP server", "addr", cfg.HTTPAddress)
 			errCh <- httpServer.ListenAndServe()
+		}()
+	}
+	if adminServer != nil {
+		go func() {
+			logger.Info("starting admin server", "addr", cfg.AdminAddress)
+			errCh <- adminServer.ListenAndServe()
 		}()
 	}
 	go func() {
@@ -355,6 +380,11 @@ func main() {
 	if httpServer != nil {
 		if err := httpServer.Shutdown(shutdownCtx); err != nil {
 			logger.Error("http server shutdown error", "error", err)
+		}
+	}
+	if adminServer != nil {
+		if err := adminServer.Shutdown(shutdownCtx); err != nil {
+			logger.Error("admin server shutdown error", "error", err)
 		}
 	}
 
