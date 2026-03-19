@@ -29,8 +29,10 @@ func NewDeviceStore(pool *pgxpool.Pool) *DeviceStore {
 	return &DeviceStore{pool: pool}
 }
 
+// host() extracts the bare IP from inet, avoiding CIDR notation (e.g. "1.2.3.4/32")
+// that net.ParseIP cannot parse.
 const deviceColumns = `id, account_id, slug, hostname, custom_hostname, identity_class, ek_fingerprint, ak_public_key,
-		       ip_address::text, timezone, status,
+		       host(ip_address), timezone, status,
 		       hostname_changes_this_year, hostname_year, last_hostname_change_at,
 		       created_at, last_seen_at`
 

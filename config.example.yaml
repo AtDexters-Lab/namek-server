@@ -13,6 +13,10 @@ dns:
   baseDomain: "piccolospace.com"
   zone: "piccolospace.com."
   relayHostname: "relay.piccolospace.com"
+  # nameservers:               # omit for direct mode (defaults to [publicHostname])
+  #   - "ns1.piccolospace.com"   # hidden-primary mode: fronting DNS servers
+  #   - "ns2.piccolospace.com"
+  #   - "ns3.piccolospace.com"
 
 powerDNS:
   apiURL: "http://localhost:8081"

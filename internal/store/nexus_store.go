@@ -48,9 +48,12 @@ func (s *NexusStore) Upsert(ctx context.Context, n *model.NexusInstance) error {
 func (s *NexusStore) GetByHostname(ctx context.Context, hostname string) (*model.NexusInstance, error) {
 	n := &model.NexusInstance{}
 	var addrs []string
+	// host() extracts bare IPs from inet; inet::text includes CIDR notation
+	// (e.g. "1.2.3.4/32") which net.ParseIP cannot parse.
 	err := s.pool.QueryRow(ctx, `
-		SELECT id, hostname, resolved_addresses::text[], region, heartbeat_interval_seconds,
-		       status, registered_at, last_seen_at
+		SELECT id, hostname,
+		       (SELECT coalesce(array_agg(host(a)), '{}') FROM unnest(resolved_addresses) a),
+		       region, heartbeat_interval_seconds, status, registered_at, last_seen_at
 		FROM nexus_instances WHERE hostname = $1
 	`, hostname).Scan(
 		&n.ID, &n.Hostname, &addrs, &n.Region, &n.HeartbeatIntervalSeconds,
@@ -67,9 +70,12 @@ func (s *NexusStore) GetByHostname(ctx context.Context, hostname string) (*model
 }
 
 func (s *NexusStore) ListActive(ctx context.Context) ([]*model.NexusInstance, error) {
+	// host() extracts bare IPs from inet; inet::text includes CIDR notation
+	// (e.g. "1.2.3.4/32") which net.ParseIP cannot parse.
 	rows, err := s.pool.Query(ctx, `
-		SELECT id, hostname, resolved_addresses::text[], region, heartbeat_interval_seconds,
-		       status, registered_at, last_seen_at
+		SELECT id, hostname,
+		       (SELECT coalesce(array_agg(host(a)), '{}') FROM unnest(resolved_addresses) a),
+		       region, heartbeat_interval_seconds, status, registered_at, last_seen_at
 		FROM nexus_instances WHERE status = 'active'
 	`)
 	if err != nil {

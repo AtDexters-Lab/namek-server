@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -36,9 +37,10 @@ type DatabaseConfig struct {
 }
 
 type DNSConfig struct {
-	BaseDomain    string `yaml:"baseDomain"`
-	Zone          string `yaml:"zone"`
-	RelayHostname string `yaml:"relayHostname"`
+	BaseDomain    string   `yaml:"baseDomain"`
+	Zone          string   `yaml:"zone"`
+	RelayHostname string   `yaml:"relayHostname"`
+	Nameservers   []string `yaml:"nameservers"`
 }
 
 type PowerDNSConfig struct {
@@ -193,6 +195,10 @@ func (c *Config) applyDefaults() {
 	if c.AliasDomain.VerificationTimeoutSeconds == 0 {
 		c.AliasDomain.VerificationTimeoutSeconds = 10
 	}
+	// PublicHostname is required (never defaulted), so it is always set here.
+	if len(c.DNS.Nameservers) == 0 {
+		c.DNS.Nameservers = []string{c.PublicHostname}
+	}
 }
 
 func (c *Config) validate() error {
@@ -210,6 +216,18 @@ func (c *Config) validate() error {
 	}
 	if c.DNS.RelayHostname == "" {
 		return fmt.Errorf("dns.relayHostname must be set")
+	}
+	seen := make(map[string]bool, len(c.DNS.Nameservers))
+	for i, ns := range c.DNS.Nameservers {
+		if ns == "" {
+			return fmt.Errorf("dns.nameservers[%d] must not be empty", i)
+		}
+		// DNS is case-insensitive; normalize before dedup check.
+		normalized := strings.ToLower(strings.TrimSuffix(ns, "."))
+		if seen[normalized] {
+			return fmt.Errorf("dns.nameservers[%d] is a duplicate: %q", i, ns)
+		}
+		seen[normalized] = true
 	}
 	if c.PowerDNS.ApiURL == "" {
 		return fmt.Errorf("powerDNS.apiURL must be set")

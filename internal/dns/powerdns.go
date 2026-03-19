@@ -205,11 +205,25 @@ type createZoneRequest struct {
 }
 
 // CreateZone creates a new zone with SOA, NS, and wildcard CNAME records.
+// primaryNS is the SOA MNAME (the zone master / hidden primary).
+// nameservers are the NS records that resolvers use (may differ from primaryNS in hidden-primary mode).
 // Returns nil if the zone already exists (409 Conflict).
-func (c *PowerDNSClient) CreateZone(ctx context.Context, zone, baseDomain, relayHostname string) error {
+func (c *PowerDNSClient) CreateZone(ctx context.Context, zone, baseDomain, primaryNS string, nameservers []string, relayHostname string) error {
+	if len(nameservers) == 0 {
+		return fmt.Errorf("nameservers must not be empty")
+	}
+
+	// Map nameservers to dot-terminated form for NS records.
+	dottedNS := make([]string, len(nameservers))
+	for i, ns := range nameservers {
+		dottedNS[i] = ensureDot(ns)
+	}
+
 	body := createZoneRequest{
-		Name:        zone,
-		Kind:        "Native",
+		Name: zone,
+		Kind: "Native",
+		// Nameservers is the PowerDNS API parameter — kept empty so PowerDNS
+		// does not auto-create NS records. We supply them explicitly via RRSets.
 		Nameservers: []string{},
 		RRSets: []RRSet{
 			{
@@ -217,15 +231,10 @@ func (c *PowerDNSClient) CreateZone(ctx context.Context, zone, baseDomain, relay
 				Type: "SOA",
 				TTL:  86400,
 				Records: []Record{{
-					Content: fmt.Sprintf("%s %s 1 10800 3600 604800 300", ensureDot("ns1."+baseDomain), ensureDot("admin."+baseDomain)),
+					Content: fmt.Sprintf("%s %s 1 10800 3600 604800 300", ensureDot(primaryNS), ensureDot("admin."+baseDomain)),
 				}},
 			},
-			{
-				Name:    zone,
-				Type:    "NS",
-				TTL:     86400,
-				Records: []Record{{Content: ensureDot("ns1." + baseDomain)}},
-			},
+			replaceRRSet(zone, "NS", dottedNS, 86400),
 			{
 				Name:    ensureDot(fmt.Sprintf("*.%s", baseDomain)),
 				Type:    "CNAME",

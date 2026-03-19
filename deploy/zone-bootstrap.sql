@@ -4,7 +4,7 @@
 -- Variables to replace before running:
 --   BASE_DOMAIN     = piccolospace.com
 --   NAMEK_IP        = <namek-server-ip>
---   NS_PRIMARY      = ns1.piccolospace.com
+--   NS_PRIMARY      = namek.piccolospace.com
 --   ADMIN_EMAIL     = admin.piccolospace.com (SOA rname format)
 
 \connect powerdns
@@ -16,16 +16,26 @@ ON CONFLICT (name) DO NOTHING;
 -- SOA record
 INSERT INTO records (domain_id, name, type, content, ttl)
 SELECT id, 'piccolospace.com', 'SOA',
-       'ns1.piccolospace.com admin.piccolospace.com 1 10800 3600 604800 300',
+       'namek.piccolospace.com admin.piccolospace.com 1 10800 3600 604800 300',
        86400
 FROM domains WHERE name = 'piccolospace.com'
 ON CONFLICT DO NOTHING;
 
--- NS record
+-- NS record (direct mode: single NS = publicHostname)
 INSERT INTO records (domain_id, name, type, content, ttl)
-SELECT id, 'piccolospace.com', 'NS', 'ns1.piccolospace.com', 86400
+SELECT id, 'piccolospace.com', 'NS', 'namek.piccolospace.com', 86400
 FROM domains WHERE name = 'piccolospace.com'
 ON CONFLICT DO NOTHING;
+
+-- Hidden-primary mode: when fronting nameservers answer public queries,
+-- add one NS record per server instead of the single record above:
+-- INSERT INTO records (domain_id, name, type, content, ttl)
+-- SELECT id, 'piccolospace.com', 'NS', 'ns1.piccolospace.com', 86400
+-- FROM domains WHERE name = 'piccolospace.com' ON CONFLICT DO NOTHING;
+--
+-- INSERT INTO records (domain_id, name, type, content, ttl)
+-- SELECT id, 'piccolospace.com', 'NS', 'ns2.piccolospace.com', 86400
+-- FROM domains WHERE name = 'piccolospace.com' ON CONFLICT DO NOTHING;
 
 -- Wildcard CNAME: all subdomains -> relay
 INSERT INTO records (domain_id, name, type, content, ttl)

@@ -8,14 +8,14 @@ ON CONFLICT (name) DO NOTHING;
 -- SOA record
 INSERT INTO records (domain_id, name, type, content, ttl)
 SELECT id, 'test.local', 'SOA',
-       'ns1.test.local admin.test.local 1 10800 3600 604800 300',
+       'namek.test.local admin.test.local 1 10800 3600 604800 300',
        86400
 FROM domains WHERE name = 'test.local'
 ON CONFLICT DO NOTHING;
 
 -- NS record
 INSERT INTO records (domain_id, name, type, content, ttl)
-SELECT id, 'test.local', 'NS', 'ns1.test.local', 86400
+SELECT id, 'test.local', 'NS', 'namek.test.local', 86400
 FROM domains WHERE name = 'test.local'
 ON CONFLICT DO NOTHING;
 
