@@ -314,14 +314,22 @@ paths:
       security:
         - mTLS: []
       requestBody:
+        required: true
         content:
           application/json:
             schema:
               type: object
+              required:
+                - backendPort
               properties:
                 region:
                   type: string
                   description: Optional region identifier for future geo-routing
+                backendPort:
+                  type: integer
+                  minimum: 1
+                  maximum: 65535
+                  description: Port the relay listens on for backend device connections
       responses:
         '200':
           description: Registration accepted
@@ -416,7 +424,7 @@ components:
           type: array
           items:
             type: string
-          description: WebSocket URLs for Nexus instances
+          description: WebSocket URLs for Nexus instances (e.g., wss://relay.example.com:8443/connect)
         retry_after_seconds:
           type: integer
           description: Present when nexus_endpoints is empty
@@ -442,6 +450,7 @@ components:
           type: array
           items:
             type: string
+          description: WebSocket URLs for Nexus instances (e.g., wss://relay.example.com:8443/connect)
 
     TokenRequest:
       type: object

@@ -1,7 +1,6 @@
 package handler
 
 import (
-	"io"
 	"log/slog"
 
 	"github.com/gin-gonic/gin"
@@ -23,17 +22,20 @@ func NewNexusRegisterHandler(nexusSvc *service.NexusService, logger *slog.Logger
 }
 
 type nexusRegisterRequest struct {
-	Region *string `json:"region"`
+	Region      *string `json:"region"`
+	BackendPort int     `json:"backendPort" binding:"required"`
 }
 
 func (h *NexusRegisterHandler) Register(c *gin.Context) {
 	var req nexusRegisterRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		// Empty body is OK (region is optional), but malformed JSON is not
-		if err != io.EOF {
-			httputil.RespondBadRequest(c, "invalid request body")
-			return
-		}
+		httputil.RespondBadRequest(c, "invalid request body")
+		return
+	}
+
+	if req.BackendPort < 1 || req.BackendPort > 65535 {
+		httputil.RespondBadRequest(c, "backendPort must be between 1 and 65535")
+		return
 	}
 
 	hostname, exists := c.Get("nexus_hostname")
@@ -43,8 +45,9 @@ func (h *NexusRegisterHandler) Register(c *gin.Context) {
 	}
 
 	resp, err := h.nexusSvc.Register(c.Request.Context(), service.RegisterNexusRequest{
-		Hostname: hostname.(string),
-		Region:   req.Region,
+		Hostname:    hostname.(string),
+		Region:      req.Region,
+		BackendPort: req.BackendPort,
 	})
 	if err != nil {
 		h.logger.Error("nexus registration failed",

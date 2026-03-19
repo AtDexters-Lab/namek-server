@@ -37,8 +37,9 @@ func NewNexusService(nexusStore *store.NexusStore, auditStore *store.AuditStore,
 }
 
 type RegisterNexusRequest struct {
-	Hostname string
-	Region   *string
+	Hostname    string
+	Region      *string
+	BackendPort int
 }
 
 type RegisterNexusResponse struct {
@@ -64,6 +65,7 @@ func (s *NexusService) Register(ctx context.Context, req RegisterNexusRequest) (
 		wasInactive := existing.Status != model.NexusStatusActive
 		existing.LastSeenAt = time.Now()
 		existing.Status = model.NexusStatusActive
+		existing.BackendPort = req.BackendPort
 		existing.HeartbeatIntervalSeconds = s.cfg.Nexus.HeartbeatIntervalSeconds
 		if req.Region != nil {
 			existing.Region = req.Region
@@ -82,7 +84,7 @@ func (s *NexusService) Register(ctx context.Context, req RegisterNexusRequest) (
 			}
 			s.auditStore.LogAction(ctx, model.ActorTypeNexus, req.Hostname,
 				"nexus.reactivated", "nexus_instance", strPtr(req.Hostname),
-				map[string]any{"dns_resolution_failed": true}, nil)
+				map[string]any{"dns_resolution_failed": true, "backend_port": req.BackendPort}, nil)
 		}
 
 		return &RegisterNexusResponse{
@@ -117,6 +119,7 @@ func (s *NexusService) Register(ctx context.Context, req RegisterNexusRequest) (
 		Hostname:                 req.Hostname,
 		ResolvedAddresses:        resolvedIPs,
 		Region:                   region,
+		BackendPort:              req.BackendPort,
 		HeartbeatIntervalSeconds: s.cfg.Nexus.HeartbeatIntervalSeconds,
 		Status:                   model.NexusStatusActive,
 		LastSeenAt:               time.Now(),
@@ -137,11 +140,12 @@ func (s *NexusService) Register(ctx context.Context, req RegisterNexusRequest) (
 
 	s.auditStore.LogAction(ctx, model.ActorTypeNexus, req.Hostname,
 		"nexus.registered", "nexus_instance", strPtr(req.Hostname),
-		map[string]any{"resolved_ips": ips, "region": region}, nil)
+		map[string]any{"resolved_ips": ips, "region": region, "backend_port": req.BackendPort}, nil)
 
 	s.logger.Info("nexus registered",
 		"hostname", req.Hostname,
 		"resolved_ips", ips,
+		"backend_port", req.BackendPort,
 	)
 
 	return &RegisterNexusResponse{
@@ -158,7 +162,11 @@ func (s *NexusService) GetActiveEndpoints(ctx context.Context) ([]string, error)
 
 	endpoints := make([]string, 0, len(instances))
 	for _, inst := range instances {
-		endpoints = append(endpoints, fmt.Sprintf("wss://%s/connect", inst.Hostname))
+		if inst.BackendPort == 443 {
+			endpoints = append(endpoints, fmt.Sprintf("wss://%s/connect", inst.Hostname))
+		} else {
+			endpoints = append(endpoints, fmt.Sprintf("wss://%s:%d/connect", inst.Hostname, inst.BackendPort))
+		}
 	}
 	return endpoints, nil
 }

@@ -19,6 +19,7 @@ type NexusInstance struct {
 	Hostname                 string      `json:"hostname"`
 	ResolvedAddresses        []net.IP    `json:"resolved_addresses"`
 	Region                   *string     `json:"region,omitempty"`
+	BackendPort              int         `json:"backend_port"`
 	HeartbeatIntervalSeconds int         `json:"heartbeat_interval_seconds"`
 	Status                   NexusStatus `json:"status"`
 	RegisteredAt             time.Time   `json:"registered_at"`

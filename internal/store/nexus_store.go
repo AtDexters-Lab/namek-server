@@ -30,15 +30,16 @@ func (s *NexusStore) Upsert(ctx context.Context, n *model.NexusInstance) error {
 	}
 
 	_, err := s.pool.Exec(ctx, `
-		INSERT INTO nexus_instances (id, hostname, resolved_addresses, region, heartbeat_interval_seconds, status, last_seen_at)
-		VALUES ($1, $2, $3::inet[], $4, $5, $6, NOW())
+		INSERT INTO nexus_instances (id, hostname, resolved_addresses, region, backend_port, heartbeat_interval_seconds, status, last_seen_at)
+		VALUES ($1, $2, $3::inet[], $4, $5, $6, $7, NOW())
 		ON CONFLICT (hostname) DO UPDATE SET
 			resolved_addresses = $3::inet[],
 			region = $4,
-			heartbeat_interval_seconds = $5,
+			backend_port = $5,
+			heartbeat_interval_seconds = $6,
 			status = 'active',
 			last_seen_at = NOW()
-	`, n.ID, n.Hostname, addrs, n.Region, n.HeartbeatIntervalSeconds, n.Status)
+	`, n.ID, n.Hostname, addrs, n.Region, n.BackendPort, n.HeartbeatIntervalSeconds, n.Status)
 	if err != nil {
 		return fmt.Errorf("upsert nexus instance: %w", err)
 	}
@@ -53,10 +54,10 @@ func (s *NexusStore) GetByHostname(ctx context.Context, hostname string) (*model
 	err := s.pool.QueryRow(ctx, `
 		SELECT id, hostname,
 		       (SELECT coalesce(array_agg(host(a)), '{}') FROM unnest(resolved_addresses) a),
-		       region, heartbeat_interval_seconds, status, registered_at, last_seen_at
+		       region, backend_port, heartbeat_interval_seconds, status, registered_at, last_seen_at
 		FROM nexus_instances WHERE hostname = $1
 	`, hostname).Scan(
-		&n.ID, &n.Hostname, &addrs, &n.Region, &n.HeartbeatIntervalSeconds,
+		&n.ID, &n.Hostname, &addrs, &n.Region, &n.BackendPort, &n.HeartbeatIntervalSeconds,
 		&n.Status, &n.RegisteredAt, &n.LastSeenAt,
 	)
 	if err != nil {
@@ -75,7 +76,7 @@ func (s *NexusStore) ListActive(ctx context.Context) ([]*model.NexusInstance, er
 	rows, err := s.pool.Query(ctx, `
 		SELECT id, hostname,
 		       (SELECT coalesce(array_agg(host(a)), '{}') FROM unnest(resolved_addresses) a),
-		       region, heartbeat_interval_seconds, status, registered_at, last_seen_at
+		       region, backend_port, heartbeat_interval_seconds, status, registered_at, last_seen_at
 		FROM nexus_instances WHERE status = 'active'
 	`)
 	if err != nil {
@@ -88,7 +89,7 @@ func (s *NexusStore) ListActive(ctx context.Context) ([]*model.NexusInstance, er
 		n := &model.NexusInstance{}
 		var addrs []string
 		if err := rows.Scan(
-			&n.ID, &n.Hostname, &addrs, &n.Region, &n.HeartbeatIntervalSeconds,
+			&n.ID, &n.Hostname, &addrs, &n.Region, &n.BackendPort, &n.HeartbeatIntervalSeconds,
 			&n.Status, &n.RegisteredAt, &n.LastSeenAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan nexus instance: %w", err)
