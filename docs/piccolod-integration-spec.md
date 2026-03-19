@@ -396,7 +396,7 @@ Devices get a canonical hostname at enrollment: `<slug>.baseDomain` (16-char bas
 
 - Pattern: `^[a-z0-9]{3,24}$` (lowercase alphanumeric, 3-24 chars)
 - No hyphens, underscores, or dots
-- Reserved words: `relay`, `namek`, `www`, `mail`, `ns1`, `ns2`, `admin`, `api`, `internal`
+- Reserved words: `relay`, `namek`, `www`, `mail`, `admin`, `api`, `internal`
 - Must be unique across all devices and not match any device's slug (cross-namespace uniqueness)
 - Must not be in the released hostname cooldown period (default: 365 days)
 

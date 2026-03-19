@@ -99,7 +99,7 @@ func main() {
 	pdns := dns.NewPowerDNSClient(cfg.PowerDNS, logger)
 
 	// Bootstrap DNS zone (retries until PowerDNS is ready)
-	if err := dns.BootstrapZone(ctx, pdns, cfg.DNS, logger); err != nil {
+	if err := dns.BootstrapZone(ctx, pdns, cfg.DNS, cfg.PublicHostname, logger); err != nil {
 		logger.Error("failed to bootstrap dns zone", "error", err)
 		os.Exit(1)
 	}

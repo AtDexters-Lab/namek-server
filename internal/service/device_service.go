@@ -40,12 +40,7 @@ var (
 
 	// Lowercase alphanumeric only, 3-24 chars. Cross-namespace uniqueness
 	// with slugs (16-char Crockford Base32) is enforced by IsLabelTaken.
-	hostnameRegex    = regexp.MustCompile(`^[a-z0-9]{3,24}$`)
-	reservedHostnames = map[string]bool{
-		"relay": true, "namek": true, "www": true, "mail": true,
-		"ns1": true, "ns2": true, "admin": true, "api": true,
-		"internal": true,
-	}
+	hostnameRegex = regexp.MustCompile(`^[a-z0-9]{3,24}$`)
 )
 
 type PendingEnrollment struct {
@@ -68,21 +63,43 @@ type DeviceService struct {
 	cfg          *config.Config
 	logger       *slog.Logger
 
-	mu       sync.Mutex
-	pending  map[string]*PendingEnrollment // keyed by nonce
-	ekIndex  map[string]string             // ek_fingerprint -> nonce (for dedup)
+	reservedHostnames map[string]bool
+
+	mu      sync.Mutex
+	pending map[string]*PendingEnrollment // keyed by nonce
+	ekIndex map[string]string             // ek_fingerprint -> nonce (for dedup)
 }
 
 func NewDeviceService(deviceStore *store.DeviceStore, accountStore *store.AccountStore, auditStore *store.AuditStore, pool *pgxpool.Pool, cfg *config.Config, logger *slog.Logger) *DeviceService {
+	reserved := map[string]bool{
+		"relay": true, "namek": true, "www": true, "mail": true,
+		"admin": true, "api": true, "internal": true,
+	}
+	// Reserve labels derived from configured nameservers and publicHostname
+	// that are subdomains of baseDomain (e.g. "ns1.example.com" with baseDomain "example.com" → "ns1").
+	suffix := "." + cfg.DNS.BaseDomain
+	fqdns := make([]string, len(cfg.DNS.Nameservers)+1)
+	copy(fqdns, cfg.DNS.Nameservers)
+	fqdns[len(fqdns)-1] = cfg.PublicHostname
+	for _, fqdn := range fqdns {
+		if strings.HasSuffix(fqdn, suffix) {
+			label := strings.TrimSuffix(fqdn, suffix)
+			if label != "" && !strings.Contains(label, ".") {
+				reserved[strings.ToLower(label)] = true
+			}
+		}
+	}
+
 	svc := &DeviceService{
-		deviceStore:  deviceStore,
-		accountStore: accountStore,
-		auditStore:   auditStore,
-		pool:         pool,
-		cfg:          cfg,
-		logger:       logger,
-		pending:      make(map[string]*PendingEnrollment),
-		ekIndex:      make(map[string]string),
+		deviceStore:       deviceStore,
+		accountStore:      accountStore,
+		auditStore:        auditStore,
+		pool:              pool,
+		cfg:               cfg,
+		logger:            logger,
+		reservedHostnames: reserved,
+		pending:           make(map[string]*PendingEnrollment),
+		ekIndex:           make(map[string]string),
 	}
 	return svc
 }
@@ -334,7 +351,7 @@ func (s *DeviceService) SetCustomHostname(ctx context.Context, deviceID uuid.UUI
 	if !hostnameRegex.MatchString(hostname) {
 		return &ErrValidation{Message: "invalid hostname: must be 3-24 lowercase alphanumeric characters"}
 	}
-	if reservedHostnames[hostname] {
+	if s.reservedHostnames[hostname] {
 		return &ErrValidation{Message: "hostname is reserved"}
 	}
 
