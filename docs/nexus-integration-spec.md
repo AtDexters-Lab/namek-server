@@ -58,10 +58,11 @@ mTLS with client certificate. The certificate must satisfy:
 ### Request body
 
 ```json
-{"region": "us-west-2"}
+{"region": "us-west-2", "backendPort": 8443}
 ```
 
-The `region` field is optional. An empty body or `{}` is valid.
+- `backendPort` (integer, **required**): The port the relay listens on for backend (device) WebSocket connections. Must be 1–65535.
+- `region` (string, optional): Region identifier for future geo-routing.
 
 ### Response
 

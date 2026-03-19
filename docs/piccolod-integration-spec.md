@@ -513,7 +513,7 @@ Complete enrollment with credential proof and TPM quote.
   "device_id": "550e8400-e29b-41d4-a716-446655440000",
   "hostname": "a1b2c3d4e5f6g7h8.example.com",
   "identity_class": "hardware_tpm",
-  "nexus_endpoints": ["wss://relay.example.com/connect"],
+  "nexus_endpoints": ["wss://relay.example.com:8443/connect"],
   "retry_after_seconds": 5,
   "reenrolled": true
 }
@@ -579,7 +579,7 @@ Get device info.
   "alias_domains": ["app.example.com"],
   "status": "active",
   "identity_class": "hardware_tpm",
-  "nexus_endpoints": ["wss://relay.example.com/connect"]
+  "nexus_endpoints": ["wss://relay.example.com:8443/connect"]
 }
 ```
 

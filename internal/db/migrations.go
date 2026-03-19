@@ -8,7 +8,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const currentVersion = 2
+const currentVersion = 3
 
 var migrations = []string{
 	// Version 1: Initial schema
@@ -109,6 +109,9 @@ var migrations = []string{
 		data       BYTEA NOT NULL,
 		updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 	);`,
+
+	// Version 3: Backend port for nexus relay registration
+	`ALTER TABLE nexus_instances ADD COLUMN backend_port INT NOT NULL DEFAULT 443;`,
 }
 
 func Migrate(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger) error {
