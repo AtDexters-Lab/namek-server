@@ -231,8 +231,13 @@ func (c *Client) RequestNexusToken(ctx context.Context, stage int, sessionNonce 
 }
 
 // CreateACMEChallenge calls POST /api/v1/acme/challenges (authenticated).
-func (c *Client) CreateACMEChallenge(ctx context.Context, digest string) (*ChallengeResult, error) {
+// hostname is optional: if empty, the challenge targets the device's canonical hostname.
+// To target a custom hostname, pass the full FQDN (e.g. "mydevice.example.com").
+func (c *Client) CreateACMEChallenge(ctx context.Context, digest, hostname string) (*ChallengeResult, error) {
 	body := map[string]string{"digest": digest}
+	if hostname != "" {
+		body["hostname"] = hostname
+	}
 	resp, err := c.doAuthenticated(ctx, http.MethodPost, "/api/v1/acme/challenges", body)
 	if err != nil {
 		return nil, err
