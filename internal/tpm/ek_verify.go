@@ -50,8 +50,35 @@ func NewVerifier(cfg config.TPMConfig, logger *slog.Logger) (Verifier, error) {
 	return v, nil
 }
 
+// trimDERTrailingData extracts the first complete ASN.1 element from der,
+// stripping any trailing bytes. Some TPM manufacturers ship EK certificates
+// with trailing padding after the DER structure; Go's x509.ParseCertificate
+// rejects these with "x509: trailing data".
+//
+// Returns (trimmedBytes, true) if trailing data was stripped, or
+// (originalBytes, false) if the input was already clean or unparseable.
+func trimDERTrailingData(der []byte) ([]byte, bool) {
+	var raw asn1.RawValue
+	rest, err := asn1.Unmarshal(der, &raw)
+	if err != nil || len(rest) == 0 {
+		return der, false
+	}
+	return raw.FullBytes, true
+}
+
+// parseEKCertLenient parses a DER-encoded X.509 certificate, tolerating
+// trailing bytes after the ASN.1 SEQUENCE structure.
+func (v *realVerifier) parseEKCertLenient(der []byte) (*x509.Certificate, error) {
+	trimmed, didTrim := trimDERTrailingData(der)
+	if didTrim {
+		v.logger.Warn("stripped trailing data from EK certificate DER",
+			"originalLen", len(der), "trimmedLen", len(trimmed))
+	}
+	return x509.ParseCertificate(trimmed)
+}
+
 func (v *realVerifier) VerifyEKCert(ekCertDER []byte) (string, crypto.PublicKey, error) {
-	cert, err := x509.ParseCertificate(ekCertDER)
+	cert, err := v.parseEKCertLenient(ekCertDER)
 	if err != nil {
 		return "", nil, fmt.Errorf("parse EK cert: %w", err)
 	}
@@ -220,20 +247,23 @@ func (v *realVerifier) ParseAKPublic(akParams []byte) ([]byte, []byte, error) {
 }
 
 func (v *realVerifier) ExtractEKPublicKey(ekCertDER []byte) (crypto.PublicKey, error) {
-	cert, err := x509.ParseCertificate(ekCertDER)
+	cert, err := v.parseEKCertLenient(ekCertDER)
 	if err != nil {
 		return nil, fmt.Errorf("parse EK cert: %w", err)
 	}
 	return cert.PublicKey, nil
 }
 
+// EKFingerprint normalizes the DER bytes (stripping trailing data) before
+// hashing so the fingerprint is stable regardless of TPM-appended padding.
 func (v *realVerifier) EKFingerprint(ekCertDER []byte) string {
-	h := sha256.Sum256(ekCertDER)
+	normalized, _ := trimDERTrailingData(ekCertDER)
+	h := sha256.Sum256(normalized)
 	return hex.EncodeToString(h[:])
 }
 
 func (v *realVerifier) ParseEKCert(ekCertDER []byte) (*x509.Certificate, error) {
-	return x509.ParseCertificate(ekCertDER)
+	return v.parseEKCertLenient(ekCertDER)
 }
 
 func (v *realVerifier) loadCertsFromDir(dir string, pool *x509.CertPool, label string) int {

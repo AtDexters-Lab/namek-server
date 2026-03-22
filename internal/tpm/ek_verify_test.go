@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/binary"
 	"log/slog"
@@ -271,5 +273,113 @@ func TestParseAKPublic_DifferentKeySizes(t *testing.T) {
 	}
 	if len(name) == 0 {
 		t.Error("name is empty")
+	}
+}
+
+// buildSelfSignedCertDER creates a minimal self-signed X.509 certificate in DER form.
+func buildSelfSignedCertDER(t *testing.T) ([]byte, *rsa.PrivateKey) {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "test-ek"},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("create cert: %v", err)
+	}
+	return der, key
+}
+
+func TestTrimDERTrailingData(t *testing.T) {
+	certDER, _ := buildSelfSignedCertDER(t)
+
+	tests := []struct {
+		name    string
+		input   []byte
+		want    []byte
+		trimmed bool
+	}{
+		{"clean cert unchanged", certDER, certDER, false},
+		{"trailing null byte", append(bytes.Clone(certDER), 0x00), certDER, true},
+		{"trailing garbage bytes", append(bytes.Clone(certDER), 0xDE, 0xAD, 0xBE, 0xEF), certDER, true},
+		{"trailing valid ASN.1 element", append(bytes.Clone(certDER), certDER...), certDER, true},
+		{"invalid ASN.1 returns original", []byte{0xFF, 0xFF}, []byte{0xFF, 0xFF}, false},
+		{"nil input", nil, nil, false},
+		{"empty input", []byte{}, []byte{}, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, didTrim := trimDERTrailingData(tt.input)
+			if !bytes.Equal(got, tt.want) {
+				t.Errorf("trimDERTrailingData: got %d bytes, want %d bytes", len(got), len(tt.want))
+			}
+			if didTrim != tt.trimmed {
+				t.Errorf("trimDERTrailingData trimmed=%v, want %v", didTrim, tt.trimmed)
+			}
+		})
+	}
+}
+
+func TestParseEKCert_TrailingData(t *testing.T) {
+	certDER, _ := buildSelfSignedCertDER(t)
+	v := &realVerifier{logger: noopLogger()}
+
+	// Clean cert parses fine
+	cert, err := v.ParseEKCert(certDER)
+	if err != nil {
+		t.Fatalf("clean cert: %v", err)
+	}
+	if cert.Subject.CommonName != "test-ek" {
+		t.Errorf("unexpected CN: %s", cert.Subject.CommonName)
+	}
+
+	// Cert with trailing bytes also parses
+	dirty := append(bytes.Clone(certDER), 0x00, 0x00, 0x00)
+	cert2, err := v.ParseEKCert(dirty)
+	if err != nil {
+		t.Fatalf("trailing data cert: %v", err)
+	}
+	if cert2.Subject.CommonName != "test-ek" {
+		t.Errorf("unexpected CN: %s", cert2.Subject.CommonName)
+	}
+}
+
+func TestExtractEKPublicKey_TrailingData(t *testing.T) {
+	certDER, key := buildSelfSignedCertDER(t)
+	v := &realVerifier{logger: noopLogger()}
+
+	dirty := append(bytes.Clone(certDER), 0x00, 0xFF)
+	pubKey, err := v.ExtractEKPublicKey(dirty)
+	if err != nil {
+		t.Fatalf("ExtractEKPublicKey with trailing data: %v", err)
+	}
+	rsaPub, ok := pubKey.(*rsa.PublicKey)
+	if !ok {
+		t.Fatal("expected RSA public key")
+	}
+	if rsaPub.N.Cmp(key.PublicKey.N) != 0 {
+		t.Error("extracted public key does not match")
+	}
+}
+
+func TestEKFingerprint_Normalized(t *testing.T) {
+	certDER, _ := buildSelfSignedCertDER(t)
+	v := &realVerifier{logger: noopLogger()}
+
+	clean := v.EKFingerprint(certDER)
+	dirty := v.EKFingerprint(append(bytes.Clone(certDER), 0x00, 0x00))
+
+	if clean != dirty {
+		t.Errorf("fingerprints differ:\n  clean: %s\n  dirty: %s", clean, dirty)
+	}
+
+	// Sanity: fingerprint is 64 hex chars (SHA-256)
+	if len(clean) != 64 {
+		t.Errorf("unexpected fingerprint length: %d", len(clean))
 	}
 }
