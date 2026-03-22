@@ -99,14 +99,25 @@ func TestFullFlow(t *testing.T) {
 	assert.Equal(t, result.DeviceID, result2.DeviceID, "re-enrollment should return same device ID")
 	assert.Equal(t, result.Hostname, result2.Hostname, "re-enrollment should preserve hostname")
 
-	// 8-9. ACME challenge lifecycle
+	// 8. ACME challenge lifecycle (canonical hostname)
 	// Digest validation now accepts any printable ASCII up to 512 chars
-	challenge, err := client.CreateACMEChallenge(ctx, "dGVzdHRlc3R0ZXN0dGVzdHRlc3R0ZXN0dGVzdHRlc3Q")
+	challenge, err := client.CreateACMEChallenge(ctx, "dGVzdHRlc3R0ZXN0dGVzdHRlc3R0ZXN0dGVzdHRlc3Q", "")
 	if err != nil {
 		t.Skipf("ACME challenge failed (PowerDNS?): %v", err)
 	}
 	assert.NotEmpty(t, challenge.ID)
+	assert.Contains(t, challenge.FQDN, "_acme-challenge.")
 	require.NoError(t, client.DeleteACMEChallenge(ctx, challenge.ID))
+
+	// 8b. ACME challenge with custom hostname
+	customFQDN := hostname + ".test.local"
+	customChallenge, err := client.CreateACMEChallenge(ctx, "Y3VzdG9tY2hhbGxlbmdl", customFQDN)
+	if err != nil {
+		t.Skipf("ACME custom hostname challenge failed (PowerDNS?): %v", err)
+	}
+	assert.NotEmpty(t, customChallenge.ID)
+	assert.Equal(t, "_acme-challenge."+customFQDN, customChallenge.FQDN)
+	require.NoError(t, client.DeleteACMEChallenge(ctx, customChallenge.ID))
 
 	// 9. AK persistence: create a new TPM device with state dir, close it,
 	// reopen from the same state dir, and verify the AK is identical.
