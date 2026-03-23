@@ -1,6 +1,8 @@
 package tpm
 
 const (
-	IdentityClassHardwareTPM = "hardware_tpm"
-	IdentityClassSoftwareTPM = "software_tpm"
+	IdentityClassVerified          = "verified"
+	IdentityClassCrowdCorroborated = "crowd_corroborated"
+	IdentityClassUnverifiedHW      = "unverified_hw"
+	IdentityClassSoftware          = "software"
 )

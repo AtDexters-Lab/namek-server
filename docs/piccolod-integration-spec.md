@@ -207,7 +207,7 @@ Two-phase challenge-response:
 - Device decrypts credential via `ActivateCredential` (proves EK/AK binding)
 - Device generates TPM quote over enrollment nonce (proves AK possession)
 - Device sends decrypted secret + quote
-- Server verifies both, creates device record with a 16-character base32-crockford slug as hostname label
+- Server verifies both, creates device record with a 20-character base32-crockford slug (deterministically derived from EK fingerprint) as hostname label
 - Returns: device ID, hostname (`<slug>.baseDomain`), identity class, Nexus endpoints
 
 The `namekclient.Enroll()` method handles both phases in a single call.
@@ -390,7 +390,7 @@ Optional. Only needed if the device runs an HTTPS server that needs a valid TLS 
 
 ## 8. Custom Hostname
 
-Devices get a canonical hostname at enrollment: `<slug>.baseDomain` (16-char base32-crockford slug, 80 bits entropy). They can optionally set a custom hostname for human-friendly access.
+Devices get a canonical hostname at enrollment: `<slug>.baseDomain` (20-char base32-crockford slug, deterministically derived from EK fingerprint, 100 bits entropy). They can optionally set a custom hostname for human-friendly access.
 
 ### Validation rules
 

@@ -18,6 +18,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/AtDexters-Lab/namek-server/internal/config"
+	"github.com/AtDexters-Lab/namek-server/internal/identity"
 	"github.com/AtDexters-Lab/namek-server/internal/model"
 	"github.com/AtDexters-Lab/namek-server/internal/slug"
 	"github.com/AtDexters-Lab/namek-server/internal/store"
@@ -39,12 +40,13 @@ var (
 	ErrQuoteVerification   = errors.New("quote verification failed")
 
 	// Lowercase alphanumeric only, 3-24 chars. Cross-namespace uniqueness
-	// with slugs (16-char Crockford Base32) is enforced by IsLabelTaken.
+	// with slugs (20-char Crockford Base32) is enforced by IsLabelTaken.
 	hostnameRegex = regexp.MustCompile(`^[a-z0-9]{3,24}$`)
 )
 
 type PendingEnrollment struct {
 	EKPubKey         crypto.PublicKey
+	EKCertDER        []byte
 	AKPubKeyDER      []byte
 	AKName           []byte
 	ChallengeSecret  []byte
@@ -55,13 +57,21 @@ type PendingEnrollment struct {
 	ExistingDeviceID *uuid.UUID // non-nil for re-enrollment of active devices
 }
 
+// RecoveryProcessor handles recovery bundle processing and claim attribution.
+type RecoveryProcessor interface {
+	ValidateRecoveryBundle(bundle *RecoveryBundle) error
+	ProcessRecoveryBundle(ctx context.Context, deviceID uuid.UUID, ekFingerprint string, bundle *RecoveryBundle) error
+	AttributeClaimsForDevice(ctx context.Context, ekFingerprint string, akPublicKey []byte) error
+}
+
 type DeviceService struct {
-	deviceStore  *store.DeviceStore
-	accountStore *store.AccountStore
-	auditStore   *store.AuditStore
-	pool         *pgxpool.Pool
-	cfg          *config.Config
-	logger       *slog.Logger
+	deviceStore       *store.DeviceStore
+	accountStore      *store.AccountStore
+	auditStore        *store.AuditStore
+	pool              *pgxpool.Pool
+	cfg               *config.Config
+	logger            *slog.Logger
+	recoveryProcessor RecoveryProcessor
 
 	reservedHostnames map[string]bool
 
@@ -102,6 +112,11 @@ func NewDeviceService(deviceStore *store.DeviceStore, accountStore *store.Accoun
 		ekIndex:           make(map[string]string),
 	}
 	return svc
+}
+
+// SetRecoveryProcessor sets the recovery processor for handling recovery bundles.
+func (s *DeviceService) SetRecoveryProcessor(rp RecoveryProcessor) {
+	s.recoveryProcessor = rp
 }
 
 type EnrollRequest struct {
@@ -180,6 +195,7 @@ func (s *DeviceService) StartEnrollment(ctx context.Context, req EnrollRequest, 
 
 	pe := &PendingEnrollment{
 		EKPubKey:         ekPubKey,
+		EKCertDER:        req.EKCertDER,
 		AKPubKeyDER:      akPubKeyDER,
 		AKName:           akName,
 		ChallengeSecret:  secret,
@@ -206,10 +222,11 @@ func (s *DeviceService) StartEnrollment(ctx context.Context, req EnrollRequest, 
 }
 
 type AttestRequest struct {
-	Nonce    string
-	Secret   []byte
-	QuoteB64 string
-	ClientIP net.IP
+	Nonce          string
+	Secret         []byte
+	QuoteB64       string
+	ClientIP       net.IP
+	RecoveryBundle *RecoveryBundle // optional, for recovery enrollment
 }
 
 type AttestResponse struct {
@@ -218,6 +235,10 @@ type AttestResponse struct {
 	IdentityClass  string    `json:"identity_class"`
 	NexusEndpoints []string  `json:"nexus_endpoints"`
 	Reenrolled     bool      `json:"reenrolled,omitempty"`
+	// Recovery replay hints — returned when recovery_bundle was processed,
+	// so the client knows what state to replay via separate API calls.
+	ReplayCustomHostname string   `json:"replay_custom_hostname,omitempty"`
+	ReplayAliasDomains   []string `json:"replay_alias_domains,omitempty"`
 }
 
 func (s *DeviceService) CompleteEnrollment(ctx context.Context, req AttestRequest, verifier tpm.Verifier, nexusEndpoints []string) (*AttestResponse, error) {
@@ -246,7 +267,7 @@ func (s *DeviceService) CompleteEnrollment(ctx context.Context, req AttestReques
 	}
 
 	// Verify TPM quote
-	if err := verifier.VerifyQuote(pe.AKPubKeyDER, req.Nonce, req.QuoteB64); err != nil {
+	if _, err := verifier.VerifyQuote(pe.AKPubKeyDER, req.Nonce, req.QuoteB64, nil); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrQuoteVerification, err)
 	}
 
@@ -271,6 +292,27 @@ func (s *DeviceService) CompleteEnrollment(ctx context.Context, req AttestReques
 			"hostname", device.Hostname,
 		)
 
+		// Process recovery bundle on re-enrollment (RFC 004: a device that
+		// initially enrolled without a bundle into a wrong solo account can
+		// later re-enroll with a bundle to be reconciled into the correct account)
+		if req.RecoveryBundle != nil && s.cfg.Recovery.IsEnabled() && s.recoveryProcessor != nil {
+			if err := s.recoveryProcessor.ValidateRecoveryBundle(req.RecoveryBundle); err != nil {
+				s.logger.Warn("invalid recovery bundle on re-enrollment", "device_id", device.ID, "error", err)
+			} else {
+				if err := s.recoveryProcessor.ProcessRecoveryBundle(ctx, device.ID, pe.EKFingerprint, req.RecoveryBundle); err != nil {
+					s.logger.Warn("recovery bundle processing failed on re-enrollment (non-blocking)",
+						"device_id", device.ID, "error", err)
+				}
+			}
+		}
+		// Attribute claims from this device's EK on re-enrollment
+		if s.recoveryProcessor != nil {
+			if err := s.recoveryProcessor.AttributeClaimsForDevice(ctx, pe.EKFingerprint, pe.AKPubKeyDER); err != nil {
+				s.logger.Warn("claim attribution failed on re-enrollment (non-blocking)",
+					"device_id", device.ID, "error", err)
+			}
+		}
+
 		return &AttestResponse{
 			DeviceID:       device.ID,
 			Hostname:       device.Hostname,
@@ -280,50 +322,82 @@ func (s *DeviceService) CompleteEnrollment(ctx context.Context, req AttestReques
 		}, nil
 	}
 
-	// Fresh enrollment: generate slug, create account + device in a transaction
-	deviceID := uuid.New()
-	accountID := uuid.New()
-	const maxSlugAttempts = 3
+	// Fresh enrollment: deterministic identity from EK fingerprint
+	deviceID := identity.DeviceID(pe.EKFingerprint)
 
-	account := &model.Account{ID: accountID}
-	var device *model.Device
-	for attempt := 0; attempt < maxSlugAttempts; attempt++ {
-		candidate := slug.Generate()
-		taken, err := s.deviceStore.IsLabelTaken(ctx, candidate)
+	candidate, err := slug.Derive(pe.EKFingerprint)
+	if err != nil {
+		return nil, fmt.Errorf("derive slug: %w", err)
+	}
+
+	// Determine account: recovery bundle overrides deterministic account ID
+	var accountID uuid.UUID
+	accountStatus := model.AccountStatusActive
+	var recoveryDeadline *time.Time
+
+	if req.RecoveryBundle != nil && s.cfg.Recovery.IsEnabled() {
+		if s.recoveryProcessor != nil {
+			if err := s.recoveryProcessor.ValidateRecoveryBundle(req.RecoveryBundle); err != nil {
+				return nil, &ErrValidation{Message: fmt.Sprintf("invalid recovery bundle: %v", err)}
+			}
+		}
+		parsedID, err := uuid.Parse(req.RecoveryBundle.AccountID)
 		if err != nil {
-			return nil, fmt.Errorf("check slug availability: %w", err)
+			s.logger.Warn("invalid recovery bundle account_id, falling back to fresh enrollment",
+				"error", err, "ek_fingerprint", pe.EKFingerprint)
+			accountID = identity.AccountID(pe.EKFingerprint)
+		} else {
+			accountID = parsedID
+			accountStatus = model.AccountStatusPendingRecovery
+			deadline := time.Now().Add(s.cfg.QuorumTimeout())
+			recoveryDeadline = &deadline
 		}
-		if taken {
-			continue
-		}
+	} else {
+		accountID = identity.AccountID(pe.EKFingerprint)
+	}
 
-		hostname := fmt.Sprintf("%s.%s", candidate, s.cfg.DNS.BaseDomain)
-		device = &model.Device{
-			ID:            deviceID,
-			AccountID:     accountID,
-			Slug:          candidate,
-			Hostname:      hostname,
-			IdentityClass: pe.IdentityClass,
-			EKFingerprint: pe.EKFingerprint,
-			AKPublicKey:   pe.AKPubKeyDER,
-			IPAddress:     req.ClientIP,
-			Status:        model.DeviceStatusActive,
-		}
+	hostname := fmt.Sprintf("%s.%s", candidate, s.cfg.DNS.BaseDomain)
+	device := &model.Device{
+		ID:            deviceID,
+		AccountID:     accountID,
+		Slug:          candidate,
+		Hostname:      hostname,
+		IdentityClass: pe.IdentityClass,
+		EKFingerprint: pe.EKFingerprint,
+		EKCertDER:     pe.EKCertDER,
+		AKPublicKey:   pe.AKPubKeyDER,
+		IPAddress:     req.ClientIP,
+		Status:        model.DeviceStatusActive,
+	}
 
+	if accountStatus == model.AccountStatusPendingRecovery {
+		// Recovery path: transactional account creation + device insertion
+		account := &model.Account{
+			ID:               accountID,
+			Status:           accountStatus,
+			MembershipEpoch:  1,
+			RecoveryDeadline: recoveryDeadline,
+		}
+		if err := store.CreateDeviceWithRecoveryAccount(ctx, s.pool, account, device); err != nil {
+			if errors.Is(err, store.ErrDuplicateEK) {
+				return nil, ErrDeviceAlreadyExists
+			}
+			return nil, fmt.Errorf("create device with recovery account: %w", err)
+		}
+	} else {
+		// Standard fresh enrollment
+		account := &model.Account{
+			ID:                    accountID,
+			Status:                model.AccountStatusActive,
+			MembershipEpoch:       1,
+			FoundingEKFingerprint: pe.EKFingerprint,
+		}
 		if err := store.CreateDeviceWithAccount(ctx, s.pool, account, device); err != nil {
 			if errors.Is(err, store.ErrDuplicateEK) {
 				return nil, ErrDeviceAlreadyExists
 			}
-			if errors.Is(err, store.ErrDuplicateSlug) {
-				device = nil // retry with new slug
-				continue
-			}
 			return nil, fmt.Errorf("create device with account: %w", err)
 		}
-		break // success
-	}
-	if device == nil {
-		return nil, fmt.Errorf("failed to generate unique slug after %d attempts", maxSlugAttempts)
 	}
 
 	s.auditStore.LogAction(ctx, model.ActorTypeDevice, deviceID.String(),
@@ -332,17 +406,38 @@ func (s *DeviceService) CompleteEnrollment(ctx context.Context, req AttestReques
 
 	s.logger.Info("device enrolled",
 		"device_id", deviceID,
-		"hostname", device.Hostname,
-		"slug", device.Slug,
+		"hostname", hostname,
+		"slug", candidate,
 		"identity_class", pe.IdentityClass,
 	)
 
-	return &AttestResponse{
+	// Post-enrollment: process recovery bundle (non-blocking)
+	if req.RecoveryBundle != nil && s.cfg.Recovery.IsEnabled() && s.recoveryProcessor != nil {
+		if err := s.recoveryProcessor.ProcessRecoveryBundle(ctx, deviceID, pe.EKFingerprint, req.RecoveryBundle); err != nil {
+			s.logger.Warn("recovery bundle processing failed (non-blocking)",
+				"device_id", deviceID, "error", err)
+		}
+	}
+
+	// Post-enrollment: attribute existing claims from this device (non-blocking)
+	if s.recoveryProcessor != nil {
+		if err := s.recoveryProcessor.AttributeClaimsForDevice(ctx, pe.EKFingerprint, pe.AKPubKeyDER); err != nil {
+			s.logger.Warn("claim attribution failed (non-blocking)",
+				"device_id", deviceID, "error", err)
+		}
+	}
+
+	resp := &AttestResponse{
 		DeviceID:       deviceID,
-		Hostname:       device.Hostname,
+		Hostname:       hostname,
 		IdentityClass:  pe.IdentityClass,
 		NexusEndpoints: nexusEndpoints,
-	}, nil
+	}
+	if req.RecoveryBundle != nil {
+		resp.ReplayCustomHostname = req.RecoveryBundle.CustomHostname
+		resp.ReplayAliasDomains = req.RecoveryBundle.AliasDomains
+	}
+	return resp, nil
 }
 
 func (s *DeviceService) SetCustomHostname(ctx context.Context, deviceID uuid.UUID, hostname string) error {

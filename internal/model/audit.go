@@ -9,9 +9,10 @@ import (
 type ActorType string
 
 const (
-	ActorTypeDevice ActorType = "device"
-	ActorTypeNexus  ActorType = "nexus"
-	ActorTypeSystem ActorType = "system"
+	ActorTypeDevice   ActorType = "device"
+	ActorTypeNexus    ActorType = "nexus"
+	ActorTypeSystem   ActorType = "system"
+	ActorTypeOperator ActorType = "operator"
 )
 
 type AuditEntry struct {

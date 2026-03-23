@@ -23,6 +23,7 @@ type Device struct {
 	CustomHostname *string      `json:"custom_hostname"`
 	IdentityClass  string       `json:"identity_class"`
 	EKFingerprint  string       `json:"ek_fingerprint"`
+	EKCertDER      []byte       `json:"-"`
 	AKPublicKey    []byte       `json:"-"`
 	IPAddress      net.IP       `json:"ip_address,omitempty"`
 	Timezone       *string      `json:"timezone,omitempty"`
@@ -31,6 +32,7 @@ type Device struct {
 	HostnameChangesThisYear int        `json:"-"`
 	HostnameYear            int        `json:"-"`
 	LastHostnameChangeAt    *time.Time `json:"-"`
+	VoucherPendingSince     *time.Time `json:"-"`
 
 	CreatedAt  time.Time  `json:"created_at"`
 	LastSeenAt *time.Time `json:"last_seen_at,omitempty"`

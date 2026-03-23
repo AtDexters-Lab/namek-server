@@ -19,6 +19,11 @@ type Device interface {
 	// Returns base64-encoded wire format: uint32(quoteLen) || TPMS_ATTEST || TPMT_SIGNATURE
 	Quote(nonce string) (string, error)
 
+	// QuoteOverData generates a TPM quote using sha256(data) as the nonce.
+	// Used for voucher signing where the "nonce" is a deterministic hash of the payload.
+	// The nonce passed to the TPM is hex.EncodeToString(sha256.Sum256(data)).
+	QuoteOverData(data []byte) (string, error)
+
 	// Close releases TPM handles (EK, AK) and closes the connection.
 	Close() error
 }

@@ -26,6 +26,8 @@ type Config struct {
 	Enrollment EnrollmentConfig `yaml:"enrollment"`
 	Hostname     HostnameConfig     `yaml:"hostname"`
 	AliasDomain  AliasDomainConfig  `yaml:"aliasDomain"`
+	Recovery     RecoveryConfig     `yaml:"recovery"`
+	Account      AccountConfig      `yaml:"account"`
 
 	AuditRetentionDays int `yaml:"auditRetentionDays"`
 }
@@ -90,6 +92,25 @@ type HostnameConfig struct {
 	MaxChangesPerYear    int `yaml:"maxChangesPerYear"`
 	CooldownDays         int `yaml:"cooldownDays"`
 	ReleasedCooldownDays int `yaml:"releasedCooldownDays"`
+}
+
+type RecoveryConfig struct {
+	Enabled           *bool `yaml:"enabled"`
+	QuorumTimeoutDays int   `yaml:"quorumTimeoutDays"`
+}
+
+// IsEnabled returns whether recovery is enabled (defaults to true if not set).
+func (r RecoveryConfig) IsEnabled() bool {
+	if r.Enabled == nil {
+		return true
+	}
+	return *r.Enabled
+}
+
+type AccountConfig struct {
+	MaxDevicesPerAccount int `yaml:"maxDevicesPerAccount"`
+	InviteTTLHours       int `yaml:"inviteTTLHours"`
+	MaxInvitesPerAccount int `yaml:"maxInvitesPerAccount"`
 }
 
 type AliasDomainConfig struct {
@@ -185,6 +206,20 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Hostname.ReleasedCooldownDays == 0 {
 		c.Hostname.ReleasedCooldownDays = 365
+	}
+	// Recovery defaults
+	if c.Recovery.QuorumTimeoutDays == 0 {
+		c.Recovery.QuorumTimeoutDays = 7
+	}
+	// Account defaults
+	if c.Account.MaxDevicesPerAccount == 0 {
+		c.Account.MaxDevicesPerAccount = 10
+	}
+	if c.Account.InviteTTLHours == 0 {
+		c.Account.InviteTTLHours = 24
+	}
+	if c.Account.MaxInvitesPerAccount == 0 {
+		c.Account.MaxInvitesPerAccount = 5
 	}
 	if c.AliasDomain.MaxPerAccount == 0 {
 		c.AliasDomain.MaxPerAccount = 50
@@ -315,4 +350,12 @@ func (c *Config) PendingDomainExpiry() time.Duration {
 
 func (c *Config) VerificationTimeout() time.Duration {
 	return time.Duration(c.AliasDomain.VerificationTimeoutSeconds) * time.Second
+}
+
+func (c *Config) InviteTTL() time.Duration {
+	return time.Duration(c.Account.InviteTTLHours) * time.Hour
+}
+
+func (c *Config) QuorumTimeout() time.Duration {
+	return time.Duration(c.Recovery.QuorumTimeoutDays) * 24 * time.Hour
 }

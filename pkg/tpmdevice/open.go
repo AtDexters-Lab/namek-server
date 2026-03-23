@@ -2,8 +2,10 @@ package tpmdevice
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -288,6 +290,11 @@ func (d *device) ActivateCredential(encCredential []byte) ([]byte, error) {
 		return nil, fmt.Errorf("activate credential: %w", err)
 	}
 	return secret, nil
+}
+
+func (d *device) QuoteOverData(data []byte) (string, error) {
+	h := sha256.Sum256(data)
+	return d.Quote(hex.EncodeToString(h[:]))
 }
 
 func (d *device) Quote(nonce string) (string, error) {

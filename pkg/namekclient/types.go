@@ -11,13 +11,39 @@ type EnrollResult struct {
 
 // DeviceInfo is returned from GET /devices/me.
 type DeviceInfo struct {
-	DeviceID       string   `json:"device_id"`
-	Hostname       string   `json:"hostname"`
-	CustomHostname *string  `json:"custom_hostname"`
-	Status         string   `json:"status"`
-	IdentityClass  string   `json:"identity_class"`
-	NexusEndpoints []string `json:"nexus_endpoints"`
-	AliasDomains   []string `json:"alias_domains,omitempty"`
+	DeviceID               string                  `json:"device_id"`
+	Hostname               string                  `json:"hostname"`
+	CustomHostname         *string                 `json:"custom_hostname"`
+	AccountID              string                  `json:"account_id"`
+	Status                 string                  `json:"status"`
+	IdentityClass          string                  `json:"identity_class"`
+	RecoveryStatus         string                  `json:"recovery_status"`
+	NexusEndpoints         []string                `json:"nexus_endpoints"`
+	AliasDomains           []string                `json:"alias_domains,omitempty"`
+	PendingVoucherRequests []PendingVoucherRequest `json:"pending_voucher_requests,omitempty"`
+	NewVouchers            []VoucherArtifact       `json:"new_vouchers,omitempty"`
+}
+
+// InviteResult is returned from POST /accounts/invite.
+type InviteResult struct {
+	InviteCode string `json:"invite_code"`
+	AccountID  string `json:"account_id"`
+	ExpiresAt  string `json:"expires_at"`
+}
+
+// PendingVoucherRequest is a voucher that needs signing.
+type PendingVoucherRequest struct {
+	RequestID   string `json:"request_id"`
+	VoucherData string `json:"voucher_data"`
+	Nonce       string `json:"nonce"`
+}
+
+// VoucherArtifact is a signed voucher received from a peer.
+type VoucherArtifact struct {
+	Data           string `json:"data"`
+	Quote          string `json:"quote"`
+	IssuerAKPubKey string `json:"issuer_ak_public_key"`
+	IssuerEKCert   string `json:"issuer_ek_cert,omitempty"`
 }
 
 // DomainInfo represents an alias domain registered with the namek server.

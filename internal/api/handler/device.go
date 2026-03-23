@@ -11,21 +11,33 @@ import (
 	"github.com/AtDexters-Lab/namek-server/internal/httputil"
 	"github.com/AtDexters-Lab/namek-server/internal/model"
 	"github.com/AtDexters-Lab/namek-server/internal/service"
+	"github.com/AtDexters-Lab/namek-server/internal/store"
 )
 
 type DeviceHandler struct {
-	deviceSvc *service.DeviceService
-	nexusSvc  *service.NexusService
-	domainSvc *service.DomainService
-	logger    *slog.Logger
+	deviceSvc    *service.DeviceService
+	nexusSvc     *service.NexusService
+	domainSvc    *service.DomainService
+	voucherSvc   *service.VoucherService
+	accountStore *store.AccountStore
+	logger       *slog.Logger
 }
 
-func NewDeviceHandler(deviceSvc *service.DeviceService, nexusSvc *service.NexusService, domainSvc *service.DomainService, logger *slog.Logger) *DeviceHandler {
+func NewDeviceHandler(
+	deviceSvc *service.DeviceService,
+	nexusSvc *service.NexusService,
+	domainSvc *service.DomainService,
+	voucherSvc *service.VoucherService,
+	accountStore *store.AccountStore,
+	logger *slog.Logger,
+) *DeviceHandler {
 	return &DeviceHandler{
-		deviceSvc: deviceSvc,
-		nexusSvc:  nexusSvc,
-		domainSvc: domainSvc,
-		logger:    logger,
+		deviceSvc:    deviceSvc,
+		nexusSvc:     nexusSvc,
+		domainSvc:    domainSvc,
+		voucherSvc:   voucherSvc,
+		accountStore: accountStore,
+		logger:       logger,
 	}
 }
 
@@ -53,6 +65,18 @@ func (h *DeviceHandler) GetMe(c *gin.Context) {
 		aliasDomains = []string{}
 	}
 
+	// Derive recovery status from account
+	recoveryStatus := "active"
+	account, err := h.accountStore.GetByID(c.Request.Context(), d.AccountID)
+	if err == nil {
+		switch {
+		case account.Status == model.AccountStatusPendingRecovery:
+			recoveryStatus = "pending_recovery"
+		case account.DissolvedAt != nil:
+			recoveryStatus = "standalone"
+		}
+	}
+
 	resp := gin.H{
 		"device_id":       d.ID,
 		"hostname":        d.Hostname,
@@ -60,7 +84,27 @@ func (h *DeviceHandler) GetMe(c *gin.Context) {
 		"alias_domains":   aliasDomains,
 		"status":          d.Status,
 		"identity_class":  d.IdentityClass,
+		"account_id":      d.AccountID,
+		"recovery_status": recoveryStatus,
 		"nexus_endpoints": endpoints,
+	}
+
+	// Conditionally include voucher data (optimization: only query when device
+	// is involved in voucher exchange, indicated by VoucherPendingSince)
+	if d.VoucherPendingSince != nil {
+		pendingReqs, err := h.voucherSvc.GetPendingRequests(c.Request.Context(), d.ID)
+		if err != nil {
+			h.logger.Error("failed to get pending voucher requests", "device_id", d.ID, "error", err)
+		} else if len(pendingReqs) > 0 {
+			resp["pending_voucher_requests"] = pendingReqs
+		}
+
+		newVouchers, err := h.voucherSvc.GetNewVouchers(c.Request.Context(), d.ID)
+		if err != nil {
+			h.logger.Error("failed to get new vouchers", "device_id", d.ID, "error", err)
+		} else if len(newVouchers) > 0 {
+			resp["new_vouchers"] = newVouchers
+		}
 	}
 
 	httputil.RespondOK(c, resp)

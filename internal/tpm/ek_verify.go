@@ -44,7 +44,7 @@ func NewVerifier(cfg config.TPMConfig, logger *slog.Logger) (Verifier, error) {
 	}
 
 	if cfg.AllowSoftwareTPM {
-		logger.Warn("allowSoftwareTPM is enabled: any EK certificate will be accepted as software_tpm without CA verification")
+		logger.Warn("allowSoftwareTPM is enabled: any EK certificate will be accepted as software without CA verification")
 	}
 	logger.Info("tpm verifier initialized", "hardwareCAs", loaded, "allowSoftwareTPM", cfg.AllowSoftwareTPM)
 	return v, nil
@@ -107,12 +107,12 @@ func (v *realVerifier) VerifyEKCert(ekCertDER []byte) (string, crypto.PublicKey,
 
 	// Try hardware CA pool first
 	if _, err := cert.Verify(ekVerifyOpts(v.hardwareCAs)); err == nil {
-		return IdentityClassHardwareTPM, cert.PublicKey, nil
+		return IdentityClassVerified, cert.PublicKey, nil
 	}
 
 	// If software TPM is allowed, accept any EK that didn't match hardware CAs
 	if v.allowSoftwareTPM {
-		return IdentityClassSoftwareTPM, cert.PublicKey, nil
+		return IdentityClassSoftware, cert.PublicKey, nil
 	}
 
 	return "", nil, fmt.Errorf("EK cert not trusted by any hardware CA")
@@ -136,35 +136,35 @@ const (
 //
 // PCR validation is intentionally skipped (nil PCRs) at MVP — the quote serves
 // as AK proof-of-possession only. PCR policy checking is a follow-up.
-func (v *realVerifier) VerifyQuote(akPubKeyDER []byte, nonce string, quoteB64 string) error {
+func (v *realVerifier) VerifyQuote(akPubKeyDER []byte, nonce string, quoteB64 string, pcrValues map[int][]byte) (*QuoteResult, error) {
 	akPub, err := attest.ParseAKPublic(akPubKeyDER)
 	if err != nil {
-		return fmt.Errorf("parse AK public: %w", err)
+		return nil, fmt.Errorf("parse AK public: %w", err)
 	}
 
 	// Pre-check base64 string length to avoid allocating oversized buffers.
 	// Base64 encodes 3 bytes as 4 chars, so decoded size ≈ len*3/4.
 	if len(quoteB64) > maxQuoteSize*2 {
-		return fmt.Errorf("quote base64 string too large: %d chars", len(quoteB64))
+		return nil, fmt.Errorf("quote base64 string too large: %d chars", len(quoteB64))
 	}
 
 	data, err := base64.StdEncoding.DecodeString(quoteB64)
 	if err != nil {
-		return fmt.Errorf("decode quote base64: %w", err)
+		return nil, fmt.Errorf("decode quote base64: %w", err)
 	}
 	if len(data) > maxQuoteSize {
-		return fmt.Errorf("quote data exceeds max size (%d > %d)", len(data), maxQuoteSize)
+		return nil, fmt.Errorf("quote data exceeds max size (%d > %d)", len(data), maxQuoteSize)
 	}
 	if len(data) < 4 {
-		return fmt.Errorf("quote data too short: %d bytes", len(data))
+		return nil, fmt.Errorf("quote data too short: %d bytes", len(data))
 	}
 
 	ql := int(binary.BigEndian.Uint32(data[0:4]))
 	if ql+4 > len(data) {
-		return fmt.Errorf("quote length exceeds available data: %d + 4 header > %d total", ql, len(data))
+		return nil, fmt.Errorf("quote length exceeds available data: %d + 4 header > %d total", ql, len(data))
 	}
 	if len(data)-4-ql <= 0 {
-		return fmt.Errorf("signature portion is empty (quote %d bytes, total %d bytes)", ql, len(data))
+		return nil, fmt.Errorf("signature portion is empty (quote %d bytes, total %d bytes)", ql, len(data))
 	}
 
 	quoteBytes := data[4 : 4+ql]
@@ -172,11 +172,11 @@ func (v *realVerifier) VerifyQuote(akPubKeyDER []byte, nonce string, quoteB64 st
 
 	if err := akPub.Verify(attest.Quote{Quote: quoteBytes, Signature: sigBytes}, nil, []byte(nonce)); err != nil {
 		v.logger.Warn("quote verification failed", "error", err)
-		return fmt.Errorf("verify quote: %w", err)
+		return nil, fmt.Errorf("verify quote: %w", err)
 	}
 
 	v.logger.Debug("quote verification succeeded")
-	return nil
+	return &QuoteResult{}, nil
 }
 
 // MakeCredential creates an encrypted credential blob using the EK public key.

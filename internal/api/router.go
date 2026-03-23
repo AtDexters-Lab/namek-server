@@ -31,8 +31,14 @@ type RouterDeps struct {
 	TokenSvc    *service.TokenService
 	ACMESvc     *service.ACMEService
 	DomainSvc   *service.DomainService
-	DeviceStore *store.DeviceStore
-	Pool        *pgxpool.Pool
+	AccountSvc    *service.AccountService
+	VoucherSvc    *service.VoucherService
+	RecoverySvc   *service.RecoveryService
+	RecoveryStore *store.RecoveryStore
+	AuditStore    *store.AuditStore
+	DeviceStore  *store.DeviceStore
+	AccountStore *store.AccountStore
+	Pool         *pgxpool.Pool
 	PowerDNS    *dns.PowerDNSClient
 }
 
@@ -50,11 +56,14 @@ func NewRouter(deps RouterDeps) http.Handler {
 	healthH := handler.NewHealthHandler(deps.Pool)
 	nonceH := handler.NewNonceHandler(deps.NonceStore)
 	enrollH := handler.NewDeviceEnrollHandler(deps.DeviceSvc, deps.NexusSvc, deps.TPMVerifier, deps.Logger)
-	deviceH := handler.NewDeviceHandler(deps.DeviceSvc, deps.NexusSvc, deps.DomainSvc, deps.Logger)
+	deviceH := handler.NewDeviceHandler(deps.DeviceSvc, deps.NexusSvc, deps.DomainSvc, deps.VoucherSvc, deps.AccountStore, deps.Logger)
 	domainH := handler.NewDomainHandler(deps.DomainSvc, deps.Logger)
+	accountH := handler.NewAccountHandler(deps.AccountSvc, deps.Logger)
+	voucherH := handler.NewVoucherHandler(deps.VoucherSvc, deps.Logger)
 	tokenH := handler.NewTokenHandler(deps.TokenSvc, deps.Logger)
 	verifyH := handler.NewVerifyHandler(deps.TokenSvc)
 	nexusH := handler.NewNexusRegisterHandler(deps.NexusSvc, deps.Logger)
+	recoveryH := handler.NewRecoveryHandler(deps.RecoverySvc, deps.RecoveryStore, deps.AccountStore, deps.AuditStore, deps.Logger)
 	acmeH := handler.NewACMEHandler(deps.ACMESvc, deps.Logger)
 
 	// System endpoints (no auth)
@@ -92,6 +101,15 @@ func NewRouter(deps RouterDeps) http.Handler {
 		deviceAuth.POST("/tokens/nexus", tokenH.IssueNexusToken)
 		deviceAuth.POST("/acme/challenges", acmeH.CreateChallenge)
 		deviceAuth.DELETE("/acme/challenges/:id", acmeH.DeleteChallenge)
+
+		// Account management
+		deviceAuth.POST("/accounts/invite", accountH.CreateInvite)
+		deviceAuth.POST("/accounts/join", accountH.JoinAccount)
+		deviceAuth.DELETE("/accounts/leave", accountH.LeaveAccount)
+
+		// Voucher exchange
+		deviceAuth.POST("/vouchers/sign", voucherH.SignVoucher)
+		deviceAuth.GET("/vouchers", voucherH.ListVouchers)
 
 		// Domain management with per-device rate limiting
 		domainRoutes := deviceAuth.Group("/domains")
@@ -141,6 +159,12 @@ func NewRouter(deps RouterDeps) http.Handler {
 	{
 		internal.POST("/nexus/register", nexusH.Register)
 	}
+
+	// Recovery observability endpoints (under NexusAuth — same mTLS requirement as nexus registration)
+	internal.GET("/recovery/accounts", recoveryH.ListPendingAccounts)
+	internal.GET("/recovery/accounts/:id", recoveryH.GetAccountStatus)
+	internal.POST("/recovery/accounts/:id/override", recoveryH.OverrideAccount)
+	internal.POST("/recovery/accounts/:id/dissolve", recoveryH.DissolveAccount)
 
 	return r
 }

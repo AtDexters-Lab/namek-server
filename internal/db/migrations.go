@@ -8,12 +8,17 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const currentVersion = 3
+const currentVersion = 1
 
 var migrations = []string{
-	// Version 1: Initial schema
+	// Version 1: Consolidated schema (original + ACME certs + backend port + RFC 004 stateless resilience)
 	`CREATE TABLE IF NOT EXISTS accounts (
 		id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+		status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'pending_recovery')),
+		membership_epoch INT NOT NULL DEFAULT 1,
+		founding_ek_fingerprint TEXT,
+		recovery_deadline TIMESTAMPTZ,
+		dissolved_at TIMESTAMPTZ,
 		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 	);
 
@@ -23,8 +28,9 @@ var migrations = []string{
 		slug TEXT NOT NULL,
 		hostname TEXT NOT NULL UNIQUE,
 		custom_hostname TEXT UNIQUE,
-		identity_class TEXT NOT NULL CHECK (identity_class IN ('hardware_tpm', 'software_tpm')),
+		identity_class TEXT NOT NULL CHECK (identity_class IN ('verified', 'crowd_corroborated', 'unverified_hw', 'software')),
 		ek_fingerprint TEXT NOT NULL UNIQUE,
+		ek_cert_der BYTEA,
 		ak_public_key BYTEA NOT NULL,
 		ip_address INET,
 		timezone TEXT,
@@ -32,6 +38,7 @@ var migrations = []string{
 		hostname_changes_this_year INT NOT NULL DEFAULT 0,
 		hostname_year INT NOT NULL DEFAULT EXTRACT(YEAR FROM NOW()),
 		last_hostname_change_at TIMESTAMPTZ,
+		voucher_pending_since TIMESTAMPTZ,
 		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 		last_seen_at TIMESTAMPTZ,
 		CONSTRAINT devices_slug_unique UNIQUE (slug)
@@ -44,6 +51,7 @@ var migrations = []string{
 		hostname TEXT NOT NULL UNIQUE,
 		resolved_addresses INET[],
 		region TEXT,
+		backend_port INT NOT NULL DEFAULT 443,
 		heartbeat_interval_seconds INT NOT NULL DEFAULT 30,
 		status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
 		registered_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -69,7 +77,7 @@ var migrations = []string{
 	CREATE TABLE IF NOT EXISTS audit_log (
 		id BIGSERIAL PRIMARY KEY,
 		timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-		actor_type TEXT NOT NULL CHECK (actor_type IN ('device', 'nexus', 'system')),
+		actor_type TEXT NOT NULL CHECK (actor_type IN ('device', 'nexus', 'system', 'operator')),
 		actor_id TEXT NOT NULL,
 		action TEXT NOT NULL,
 		resource_type TEXT NOT NULL,
@@ -101,17 +109,68 @@ var migrations = []string{
 		PRIMARY KEY (device_id, domain_id)
 	);
 
-	CREATE INDEX IF NOT EXISTS idx_device_domain_assignments_domain_id ON device_domain_assignments(domain_id);`,
+	CREATE INDEX IF NOT EXISTS idx_device_domain_assignments_domain_id ON device_domain_assignments(domain_id);
 
-	// Version 2: ACME certificate cache
-	`CREATE TABLE IF NOT EXISTS acme_certs (
+	CREATE TABLE IF NOT EXISTS acme_certs (
 		key        TEXT PRIMARY KEY,
 		data       BYTEA NOT NULL,
 		updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-	);`,
+	);
 
-	// Version 3: Backend port for nexus relay registration
-	`ALTER TABLE nexus_instances ADD COLUMN backend_port INT NOT NULL DEFAULT 443;`,
+	CREATE TABLE IF NOT EXISTS account_invites (
+		id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+		account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+		invite_code_hash TEXT NOT NULL UNIQUE,
+		created_by_device_id UUID NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+		expires_at TIMESTAMPTZ NOT NULL,
+		consumed_at TIMESTAMPTZ,
+		consumed_by_device_id UUID REFERENCES devices(id) ON DELETE SET NULL,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_account_invites_account_id ON account_invites(account_id);
+
+	CREATE TABLE IF NOT EXISTS voucher_requests (
+		id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+		account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+		issuer_device_id UUID NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+		subject_device_id UUID NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+		voucher_data TEXT NOT NULL,
+		epoch INT NOT NULL,
+		status TEXT NOT NULL DEFAULT 'pending'
+			CHECK (status IN ('pending', 'signed', 'expired')),
+		quote TEXT,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		signed_at TIMESTAMPTZ,
+		UNIQUE(issuer_device_id, subject_device_id)
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_voucher_requests_issuer ON voucher_requests(issuer_device_id)
+		WHERE status = 'pending';
+
+	CREATE TABLE IF NOT EXISTS recovery_claims (
+		id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+		device_id UUID NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+		claimed_account_id UUID NOT NULL,
+		voucher_data TEXT NOT NULL,
+		voucher_quote TEXT NOT NULL,
+		voucher_epoch INT NOT NULL,
+		issuer_ak_public_key BYTEA NOT NULL,
+		issuer_ek_fingerprint TEXT NOT NULL,
+		issuer_ek_cert BYTEA,
+		attributed BOOLEAN NOT NULL DEFAULT FALSE,
+		rejected BOOLEAN NOT NULL DEFAULT FALSE,
+		rejection_reason TEXT,
+		attributed_at TIMESTAMPTZ,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		UNIQUE(device_id, claimed_account_id, issuer_ek_fingerprint)
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_recovery_claims_account ON recovery_claims(claimed_account_id);
+	CREATE INDEX IF NOT EXISTS idx_recovery_claims_account_attributed ON recovery_claims(claimed_account_id, attributed);
+	CREATE INDEX IF NOT EXISTS idx_recovery_claims_device ON recovery_claims(device_id);
+	CREATE INDEX IF NOT EXISTS idx_recovery_claims_issuer ON recovery_claims(issuer_ek_fingerprint)
+		WHERE attributed = FALSE;`,
 }
 
 func Migrate(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger) error {

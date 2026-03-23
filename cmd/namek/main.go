@@ -131,6 +131,11 @@ func main() {
 	tokenSvc := service.NewTokenService(stores.Device, stores.Domain, tokenIssuer, cfg, logger)
 	acmeSvc := service.NewACMEService(stores.ACME, stores.Device, pdns, cfg, logger)
 	domainSvc := service.NewDomainService(stores.Domain, stores.Device, stores.Audit, cnameResolver, cfg, logger)
+	accountSvc := service.NewAccountService(stores.Account, stores.Device, stores.Invite, stores.Audit, cfg, logger)
+	voucherSvc := service.NewVoucherService(stores.Voucher, stores.Device, stores.Account, stores.Audit, tpmVerifier, cfg, logger)
+	recoverySvc := service.NewRecoveryService(stores.Recovery, stores.Account, stores.Device, stores.Audit, tpmVerifier, cfg, logger)
+	accountSvc.SetVoucherCreator(voucherSvc)
+	deviceSvc.SetRecoveryProcessor(recoverySvc)
 
 	// Start background goroutines
 	go nexusSvc.HealthCheckLoop(ctx)
@@ -197,6 +202,38 @@ func main() {
 		}
 	}()
 
+	// Recovery quorum re-evaluation (every 5 min) and claims cleanup (daily)
+	go recoverySvc.QuorumReEvaluationLoop(ctx)
+	go recoverySvc.CleanupLoop(ctx)
+
+	// Expired voucher request cleanup (daily)
+	go func() {
+		ticker := time.NewTicker(24 * time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				voucherSvc.CleanupExpiredRequests(ctx)
+			}
+		}
+	}()
+
+	// Expired invite cleanup (daily)
+	go func() {
+		ticker := time.NewTicker(24 * time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				accountSvc.CleanupExpiredInvites(ctx)
+			}
+		}
+	}()
+
 	// Router
 	router := api.NewRouter(api.RouterDeps{
 		Config:      cfg,
@@ -208,10 +245,16 @@ func main() {
 		NexusSvc:    nexusSvc,
 		TokenSvc:    tokenSvc,
 		ACMESvc:     acmeSvc,
-		DomainSvc:   domainSvc,
-		DeviceStore: stores.Device,
-		Pool:        pool,
-		PowerDNS:    pdns,
+		DomainSvc:    domainSvc,
+		AccountSvc:   accountSvc,
+		VoucherSvc:   voucherSvc,
+		DeviceStore:   stores.Device,
+		AccountStore:  stores.Account,
+		RecoverySvc:   recoverySvc,
+		RecoveryStore: stores.Recovery,
+		AuditStore:    stores.Audit,
+		Pool:          pool,
+		PowerDNS:      pdns,
 	})
 
 	// Autocert setup

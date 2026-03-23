@@ -185,6 +185,98 @@ func (c *Client) Enroll(ctx context.Context) (*EnrollResult, error) {
 	}, nil
 }
 
+// RecoveryBundleInput is the recovery bundle included in the attest request.
+type RecoveryBundleInput struct {
+	AccountID      string
+	Vouchers       []VoucherArtifact
+	CustomHostname string
+	AliasDomains   []string
+}
+
+// EnrollWithRecovery performs the 2-phase enrollment flow with a recovery bundle.
+func (c *Client) EnrollWithRecovery(ctx context.Context, bundle *RecoveryBundleInput) (*EnrollResult, error) {
+	// Phase 1: same as normal enrollment
+	ekCert, err := c.tpm.EKCertDER()
+	if err != nil {
+		return nil, fmt.Errorf("get ek cert: %w", err)
+	}
+	akPub, err := c.tpm.AKPublic()
+	if err != nil {
+		return nil, fmt.Errorf("get ak public: %w", err)
+	}
+
+	enrollBody := map[string]string{
+		"ek_cert":   base64.StdEncoding.EncodeToString(ekCert),
+		"ak_params": base64.StdEncoding.EncodeToString(akPub),
+	}
+	var startResp enrollStartResponse
+	if err := c.doJSON(ctx, http.MethodPost, "/api/v1/devices/enroll", enrollBody, &startResp); err != nil {
+		return nil, fmt.Errorf("start enroll: %w", err)
+	}
+
+	encCredRaw, err := base64.StdEncoding.DecodeString(startResp.EncCredential)
+	if err != nil {
+		return nil, fmt.Errorf("decode enc_credential: %w", err)
+	}
+	secret, err := c.tpm.ActivateCredential(encCredRaw)
+	if err != nil {
+		return nil, fmt.Errorf("activate credential: %w", err)
+	}
+
+	quoteB64, err := c.tpm.Quote(startResp.Nonce)
+	if err != nil {
+		return nil, fmt.Errorf("generate quote: %w", err)
+	}
+
+	// Phase 2: include recovery bundle
+	attestBody := map[string]any{
+		"nonce":  startResp.Nonce,
+		"secret": base64.StdEncoding.EncodeToString(secret),
+		"quote":  quoteB64,
+	}
+
+	if bundle != nil {
+		vouchers := make([]map[string]string, 0, len(bundle.Vouchers))
+		for _, v := range bundle.Vouchers {
+			vp := map[string]string{
+				"data":                v.Data,
+				"quote":               v.Quote,
+				"issuer_ak_public_key": v.IssuerAKPubKey,
+			}
+			if v.IssuerEKCert != "" {
+				vp["issuer_ek_cert"] = v.IssuerEKCert
+			}
+			vouchers = append(vouchers, vp)
+		}
+		rb := map[string]any{
+			"account_id": bundle.AccountID,
+			"vouchers":   vouchers,
+		}
+		if bundle.CustomHostname != "" {
+			rb["custom_hostname"] = bundle.CustomHostname
+		}
+		if len(bundle.AliasDomains) > 0 {
+			rb["alias_domains"] = bundle.AliasDomains
+		}
+		attestBody["recovery_bundle"] = rb
+	}
+
+	var completeResp enrollCompleteResponse
+	if err := c.doJSON(ctx, http.MethodPost, "/api/v1/devices/enroll/attest", attestBody, &completeResp); err != nil {
+		return nil, fmt.Errorf("complete enroll: %w", err)
+	}
+
+	c.deviceID = completeResp.DeviceID
+
+	return &EnrollResult{
+		DeviceID:       completeResp.DeviceID,
+		Hostname:       completeResp.Hostname,
+		IdentityClass:  completeResp.IdentityClass,
+		NexusEndpoints: completeResp.NexusEndpoints,
+		Reenrolled:     completeResp.Reenrolled,
+	}, nil
+}
+
 // GetDeviceInfo calls GET /api/v1/devices/me (authenticated).
 func (c *Client) GetDeviceInfo(ctx context.Context) (*DeviceInfo, error) {
 	var info DeviceInfo
@@ -356,6 +448,68 @@ func (c *Client) ListDomains(ctx context.Context) ([]DomainInfo, error) {
 		return nil, err
 	}
 	return result.Domains, nil
+}
+
+// CreateInvite calls POST /api/v1/accounts/invite (authenticated).
+func (c *Client) CreateInvite(ctx context.Context) (*InviteResult, error) {
+	resp, err := c.doAuthenticated(ctx, http.MethodPost, "/api/v1/accounts/invite", nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	var result InviteResult
+	if err := decodeResponse(resp, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+// JoinAccount calls POST /api/v1/accounts/join (authenticated).
+func (c *Client) JoinAccount(ctx context.Context, inviteCode string) error {
+	body := map[string]string{"invite_code": inviteCode}
+	resp, err := c.doAuthenticated(ctx, http.MethodPost, "/api/v1/accounts/join", body)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	return nil
+}
+
+// LeaveAccount calls DELETE /api/v1/accounts/leave (authenticated).
+func (c *Client) LeaveAccount(ctx context.Context) error {
+	resp, err := c.doAuthenticated(ctx, http.MethodDelete, "/api/v1/accounts/leave", nil)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	return nil
+}
+
+// SignVoucher calls POST /api/v1/vouchers/sign (authenticated).
+func (c *Client) SignVoucher(ctx context.Context, requestID, quoteB64 string) error {
+	body := map[string]string{"request_id": requestID, "quote": quoteB64}
+	resp, err := c.doAuthenticated(ctx, http.MethodPost, "/api/v1/vouchers/sign", body)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	return nil
+}
+
+// GetVouchers calls GET /api/v1/vouchers (authenticated).
+func (c *Client) GetVouchers(ctx context.Context) ([]VoucherArtifact, error) {
+	resp, err := c.doAuthenticated(ctx, http.MethodGet, "/api/v1/vouchers", nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	var result struct {
+		Vouchers []VoucherArtifact `json:"vouchers"`
+	}
+	if err := decodeResponse(resp, &result); err != nil {
+		return nil, err
+	}
+	return result.Vouchers, nil
 }
 
 // VerifyToken calls POST /api/v1/tokens/verify (no auth).

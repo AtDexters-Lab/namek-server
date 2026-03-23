@@ -78,9 +78,24 @@ func (h *DeviceEnrollHandler) StartEnroll(c *gin.Context) {
 }
 
 type attestRequest struct {
-	Nonce  string `json:"nonce" binding:"required"`
-	Secret string `json:"secret" binding:"required"`
-	Quote  string `json:"quote" binding:"required"`
+	Nonce          string                `json:"nonce" binding:"required"`
+	Secret         string                `json:"secret" binding:"required"`
+	Quote          string                `json:"quote" binding:"required"`
+	RecoveryBundle *attestRecoveryBundle `json:"recovery_bundle,omitempty"`
+}
+
+type attestRecoveryBundle struct {
+	AccountID      string               `json:"account_id" binding:"required"`
+	Vouchers       []attestVoucherProof `json:"vouchers" binding:"required,min=1,max=100"`
+	CustomHostname string               `json:"custom_hostname,omitempty"`
+	AliasDomains   []string             `json:"alias_domains,omitempty"`
+}
+
+type attestVoucherProof struct {
+	Data              string `json:"data" binding:"required"`
+	Quote             string `json:"quote" binding:"required"`
+	IssuerAKPublicKey string `json:"issuer_ak_public_key" binding:"required"`
+	IssuerEKCert      string `json:"issuer_ek_cert,omitempty"`
 }
 
 func (h *DeviceEnrollHandler) CompleteEnroll(c *gin.Context) {
@@ -103,12 +118,32 @@ func (h *DeviceEnrollHandler) CompleteEnroll(c *gin.Context) {
 		endpoints = []string{}
 	}
 
-	resp, err := h.deviceSvc.CompleteEnrollment(c.Request.Context(), service.AttestRequest{
+	attestReq := service.AttestRequest{
 		Nonce:    req.Nonce,
 		Secret:   secret,
 		QuoteB64: req.Quote,
 		ClientIP: net.ParseIP(c.ClientIP()),
-	}, h.tpmVerifier, endpoints)
+	}
+
+	// Convert handler-level recovery bundle to service-level
+	if req.RecoveryBundle != nil {
+		rb := &service.RecoveryBundle{
+			AccountID:      req.RecoveryBundle.AccountID,
+			CustomHostname: req.RecoveryBundle.CustomHostname,
+			AliasDomains:   req.RecoveryBundle.AliasDomains,
+		}
+		for _, vp := range req.RecoveryBundle.Vouchers {
+			rb.Vouchers = append(rb.Vouchers, service.VoucherProof{
+				Data:              vp.Data,
+				Quote:             vp.Quote,
+				IssuerAKPublicKey: vp.IssuerAKPublicKey,
+				IssuerEKCert:      vp.IssuerEKCert,
+			})
+		}
+		attestReq.RecoveryBundle = rb
+	}
+
+	resp, err := h.deviceSvc.CompleteEnrollment(c.Request.Context(), attestReq, h.tpmVerifier, endpoints)
 	if err != nil {
 		switch {
 		case errors.Is(err, service.ErrPendingNotFound):

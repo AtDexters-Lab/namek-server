@@ -8,7 +8,7 @@ import (
 // TestVerifier is a mock TPM verifier for testing.
 type TestVerifier struct {
 	VerifyEKCertFn     func(ekCertDER []byte) (string, crypto.PublicKey, error)
-	VerifyQuoteFn      func(akPubKeyDER []byte, nonce string, quoteB64 string) error
+	VerifyQuoteFn      func(akPubKeyDER []byte, nonce string, quoteB64 string, pcrValues map[int][]byte) (*QuoteResult, error)
 	MakeCredentialFn   func(ekPubKey crypto.PublicKey, akName []byte, secret []byte) ([]byte, error)
 	ParseAKPublicFn    func(akParams []byte) ([]byte, []byte, error)
 	ExtractEKPubKeyFn  func(ekCertDER []byte) (crypto.PublicKey, error)
@@ -20,14 +20,14 @@ func (t *TestVerifier) VerifyEKCert(ekCertDER []byte) (string, crypto.PublicKey,
 	if t.VerifyEKCertFn != nil {
 		return t.VerifyEKCertFn(ekCertDER)
 	}
-	return IdentityClassSoftwareTPM, nil, nil
+	return IdentityClassSoftware, nil, nil
 }
 
-func (t *TestVerifier) VerifyQuote(akPubKeyDER []byte, nonce string, quoteB64 string) error {
+func (t *TestVerifier) VerifyQuote(akPubKeyDER []byte, nonce string, quoteB64 string, pcrValues map[int][]byte) (*QuoteResult, error) {
 	if t.VerifyQuoteFn != nil {
-		return t.VerifyQuoteFn(akPubKeyDER, nonce, quoteB64)
+		return t.VerifyQuoteFn(akPubKeyDER, nonce, quoteB64, pcrValues)
 	}
-	return nil
+	return &QuoteResult{}, nil
 }
 
 func (t *TestVerifier) MakeCredential(ekPubKey crypto.PublicKey, akName []byte, secret []byte) ([]byte, error) {

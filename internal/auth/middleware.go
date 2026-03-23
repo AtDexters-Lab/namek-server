@@ -86,7 +86,7 @@ func DeviceTPMAuth(deviceStore *store.DeviceStore, nonceStore *NonceStore, verif
 		}
 
 		// Verify TPM quote
-		if err := verifier.VerifyQuote(device.AKPublicKey, nonce, quoteB64); err != nil {
+		if _, err := verifier.VerifyQuote(device.AKPublicKey, nonce, quoteB64, nil); err != nil {
 			logger.Warn("tpm quote verification failed",
 				"device_id", deviceID,
 				"error", err,

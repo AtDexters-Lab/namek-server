@@ -11,7 +11,9 @@ type Verifier interface {
 	VerifyEKCert(ekCertDER []byte) (identityClass string, ekPubKey crypto.PublicKey, err error)
 
 	// VerifyQuote verifies a TPM quote signed by the given AK public key.
-	VerifyQuote(akPubKeyDER []byte, nonce string, quoteB64 string) error
+	// When pcrValues is non-nil, the quote's PCR digest is verified against
+	// the provided values. When nil, PCR validation is skipped.
+	VerifyQuote(akPubKeyDER []byte, nonce string, quoteB64 string, pcrValues map[int][]byte) (*QuoteResult, error)
 
 	// MakeCredential creates an encrypted credential challenge for the TPM.
 	MakeCredential(ekPubKey crypto.PublicKey, akName []byte, secret []byte) ([]byte, error)

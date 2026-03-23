@@ -239,7 +239,7 @@ The cascade is self-healing but causes a brief disruption.
 
 ### Hostname formats
 
-- **Canonical:** `<slug>.baseDomain` — 16-character lowercase Crockford Base32 slug (alphabet: `0-9a-hjkmnp-tv-z`, excludes `i`, `l`, `o`, `u`). Example: `a1b2c3d4e5f6g7h8.test.local`
+- **Canonical:** `<slug>.baseDomain` — 20-character lowercase Crockford Base32 slug derived deterministically from the device's EK fingerprint (alphabet: `0-9a-hjkmnp-tv-z`, excludes `i`, `l`, `o`, `u`). Example: `a1b2c3d4e5f6g7h8k9mn.test.local`
 - **Custom:** `<label>.baseDomain` — human-friendly label (3-24 chars, lowercase alphanumeric). Example: `mydevice.test.local`
 - **Alias:** User-owned domains verified via CNAME (e.g., `app.example.com`). These appear in the JWT identically to baseDomain hostnames — Nexus requires no special handling.
 - **Wildcard:** Every hostname also has a `*.<hostname>` variant for subdomain routing

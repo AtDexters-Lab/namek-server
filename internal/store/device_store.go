@@ -31,18 +31,20 @@ func NewDeviceStore(pool *pgxpool.Pool) *DeviceStore {
 
 // host() extracts the bare IP from inet, avoiding CIDR notation (e.g. "1.2.3.4/32")
 // that net.ParseIP cannot parse.
-const deviceColumns = `id, account_id, slug, hostname, custom_hostname, identity_class, ek_fingerprint, ak_public_key,
+const deviceColumns = `id, account_id, slug, hostname, custom_hostname, identity_class, ek_fingerprint, ek_cert_der, ak_public_key,
 		       host(ip_address), timezone, status,
 		       hostname_changes_this_year, hostname_year, last_hostname_change_at,
+		       voucher_pending_since,
 		       created_at, last_seen_at`
 
 func scanDevice(row pgx.Row) (*model.Device, error) {
 	d := &model.Device{}
 	var ipAddr *string
 	err := row.Scan(
-		&d.ID, &d.AccountID, &d.Slug, &d.Hostname, &d.CustomHostname, &d.IdentityClass, &d.EKFingerprint, &d.AKPublicKey,
+		&d.ID, &d.AccountID, &d.Slug, &d.Hostname, &d.CustomHostname, &d.IdentityClass, &d.EKFingerprint, &d.EKCertDER, &d.AKPublicKey,
 		&ipAddr, &d.Timezone, &d.Status,
 		&d.HostnameChangesThisYear, &d.HostnameYear, &d.LastHostnameChangeAt,
+		&d.VoucherPendingSince,
 		&d.CreatedAt, &d.LastSeenAt,
 	)
 	if err != nil {
@@ -83,6 +85,52 @@ type SetCustomHostnameParams struct {
 	CustomHostname  string
 	ChangeCount     int
 	HostnameYear    int
+}
+
+// ListByAccountID returns all active devices in an account.
+func (s *DeviceStore) ListByAccountID(ctx context.Context, accountID uuid.UUID) ([]model.Device, error) {
+	rows, err := s.pool.Query(ctx, `SELECT `+deviceColumns+` FROM devices WHERE account_id = $1 AND status = 'active'`, accountID)
+	if err != nil {
+		return nil, fmt.Errorf("list devices by account: %w", err)
+	}
+	defer rows.Close()
+
+	var devices []model.Device
+	for rows.Next() {
+		d, err := scanDevice(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan device: %w", err)
+		}
+		devices = append(devices, *d)
+	}
+	return devices, rows.Err()
+}
+
+// UpdateAccountID moves a device to a different account and cleans up
+// alias-domain assignments from the old account.
+func (s *DeviceStore) UpdateAccountID(ctx context.Context, deviceID uuid.UUID, accountID uuid.UUID) error {
+	// Remove alias-domain assignments so the device doesn't keep access
+	// to the old account's verified domains after the transfer.
+	_, err := s.pool.Exec(ctx, `
+		DELETE FROM device_domain_assignments WHERE device_id = $1
+	`, deviceID)
+	if err != nil {
+		return fmt.Errorf("clean domain assignments: %w", err)
+	}
+	_, err = s.pool.Exec(ctx, `UPDATE devices SET account_id = $1 WHERE id = $2`, accountID, deviceID)
+	if err != nil {
+		return fmt.Errorf("update device account_id: %w", err)
+	}
+	return nil
+}
+
+// SetVoucherPendingSince sets or clears the voucher_pending_since timestamp on a device.
+func (s *DeviceStore) SetVoucherPendingSince(ctx context.Context, deviceID uuid.UUID, t *time.Time) error {
+	_, err := s.pool.Exec(ctx, `UPDATE devices SET voucher_pending_since = $1 WHERE id = $2`, t, deviceID)
+	if err != nil {
+		return fmt.Errorf("set voucher pending since: %w", err)
+	}
+	return nil
 }
 
 func (s *DeviceStore) SetCustomHostname(ctx context.Context, p SetCustomHostnameParams) error {
@@ -229,6 +277,31 @@ func isDuplicateKeyError(err error) bool {
 	return strings.Contains(err.Error(), "duplicate key")
 }
 
+// CreateDevice inserts a device into an existing account.
+func (s *DeviceStore) CreateDevice(ctx context.Context, device *model.Device) error {
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO devices (id, account_id, slug, hostname, custom_hostname, identity_class, ek_fingerprint, ek_cert_der, ak_public_key, ip_address, status)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+	`, device.ID, device.AccountID, device.Slug, device.Hostname, device.CustomHostname,
+		device.IdentityClass, device.EKFingerprint, device.EKCertDER, device.AKPublicKey,
+		ipToString(device.IPAddress), device.Status)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			switch pgErr.ConstraintName {
+			case "devices_hostname_key", "devices_custom_hostname_key":
+				return ErrDuplicateHostname
+			case "devices_slug_unique":
+				return ErrDuplicateSlug
+			default:
+				return ErrDuplicateEK
+			}
+		}
+		return fmt.Errorf("insert device: %w", err)
+	}
+	return nil
+}
+
 // CreateDeviceWithAccount creates an account and a device in a single transaction.
 func CreateDeviceWithAccount(ctx context.Context, pool *pgxpool.Pool, account *model.Account, device *model.Device) error {
 	tx, err := pool.Begin(ctx)
@@ -237,16 +310,17 @@ func CreateDeviceWithAccount(ctx context.Context, pool *pgxpool.Pool, account *m
 	}
 	defer tx.Rollback(ctx)
 
-	_, err = tx.Exec(ctx, `INSERT INTO accounts (id) VALUES ($1)`, account.ID)
+	_, err = tx.Exec(ctx, `INSERT INTO accounts (id, status, membership_epoch, founding_ek_fingerprint) VALUES ($1, $2, $3, $4)`,
+		account.ID, account.Status, account.MembershipEpoch, account.FoundingEKFingerprint)
 	if err != nil {
 		return fmt.Errorf("insert account: %w", err)
 	}
 
 	_, err = tx.Exec(ctx, `
-		INSERT INTO devices (id, account_id, slug, hostname, custom_hostname, identity_class, ek_fingerprint, ak_public_key, ip_address, status)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		INSERT INTO devices (id, account_id, slug, hostname, custom_hostname, identity_class, ek_fingerprint, ek_cert_der, ak_public_key, ip_address, status)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 	`, device.ID, device.AccountID, device.Slug, device.Hostname, device.CustomHostname,
-		device.IdentityClass, device.EKFingerprint, device.AKPublicKey,
+		device.IdentityClass, device.EKFingerprint, device.EKCertDER, device.AKPublicKey,
 		ipToString(device.IPAddress), device.Status)
 	if err != nil {
 		var pgErr *pgconn.PgError
@@ -268,5 +342,52 @@ func CreateDeviceWithAccount(ctx context.Context, pool *pgxpool.Pool, account *m
 	}
 
 	account.CreatedAt = time.Now()
+	return nil
+}
+
+// CreateDeviceWithRecoveryAccount creates a recovery account (ON CONFLICT DO NOTHING)
+// and a device in a single transaction. Used for recovery enrollment where the account
+// may already exist from another device's concurrent enrollment.
+func CreateDeviceWithRecoveryAccount(ctx context.Context, pool *pgxpool.Pool, account *model.Account, device *model.Device) error {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	_, err = tx.Exec(ctx, `
+		INSERT INTO accounts (id, status, membership_epoch, founding_ek_fingerprint, recovery_deadline)
+		VALUES ($1, $2, $3, $4, $5)
+		ON CONFLICT (id) DO NOTHING
+	`, account.ID, account.Status, account.MembershipEpoch, account.FoundingEKFingerprint, account.RecoveryDeadline)
+	if err != nil {
+		return fmt.Errorf("insert recovery account: %w", err)
+	}
+
+	_, err = tx.Exec(ctx, `
+		INSERT INTO devices (id, account_id, slug, hostname, custom_hostname, identity_class, ek_fingerprint, ek_cert_der, ak_public_key, ip_address, status)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+	`, device.ID, device.AccountID, device.Slug, device.Hostname, device.CustomHostname,
+		device.IdentityClass, device.EKFingerprint, device.EKCertDER, device.AKPublicKey,
+		ipToString(device.IPAddress), device.Status)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			switch pgErr.ConstraintName {
+			case "devices_hostname_key", "devices_custom_hostname_key":
+				return ErrDuplicateHostname
+			case "devices_slug_unique":
+				return ErrDuplicateSlug
+			default:
+				return ErrDuplicateEK
+			}
+		}
+		return fmt.Errorf("insert device: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit tx: %w", err)
+	}
+
 	return nil
 }
