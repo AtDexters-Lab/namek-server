@@ -15,7 +15,7 @@ func testLogger() *slog.Logger {
 }
 
 func TestRootServesHTML(t *testing.T) {
-	handler, err := NewHandler("http://localhost:8081", "test-key", testLogger())
+	handler, err := NewHandler("http://localhost:8081", "test-key", ":8056", testLogger(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,7 +54,7 @@ func TestAPIProxy(t *testing.T) {
 	}))
 	defer backend.Close()
 
-	handler, err := NewHandler(backend.URL, "secret-key", testLogger())
+	handler, err := NewHandler(backend.URL, "secret-key", ":8056", testLogger(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +82,7 @@ func TestAPIKeyOverwrite(t *testing.T) {
 	}))
 	defer backend.Close()
 
-	handler, err := NewHandler(backend.URL, "real-key", testLogger())
+	handler, err := NewHandler(backend.URL, "real-key", ":8056", testLogger(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,7 +99,7 @@ func TestAPIKeyOverwrite(t *testing.T) {
 }
 
 func TestProxyError(t *testing.T) {
-	handler, err := NewHandler("http://127.0.0.1:1", "key", testLogger())
+	handler, err := NewHandler("http://127.0.0.1:1", "key", ":8056", testLogger(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +113,7 @@ func TestProxyError(t *testing.T) {
 }
 
 func TestHealth(t *testing.T) {
-	handler, err := NewHandler("http://localhost:8081", "key", testLogger())
+	handler, err := NewHandler("http://localhost:8081", "key", ":8056", testLogger(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,7 +127,7 @@ func TestHealth(t *testing.T) {
 }
 
 func TestFavicon(t *testing.T) {
-	handler, err := NewHandler("http://localhost:8081", "key", testLogger())
+	handler, err := NewHandler("http://localhost:8081", "key", ":8056", testLogger(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,7 +145,7 @@ func TestFavicon(t *testing.T) {
 }
 
 func TestNonAPIPathReturns404(t *testing.T) {
-	handler, err := NewHandler("http://localhost:8081", "key", testLogger())
+	handler, err := NewHandler("http://localhost:8081", "key", ":8056", testLogger(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

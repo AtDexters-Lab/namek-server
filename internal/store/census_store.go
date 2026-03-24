@@ -374,6 +374,29 @@ func (s *CensusStore) UpsertPCRCensusWithCount(ctx context.Context, pcr *model.P
 	return nil
 }
 
+// GetAllPCRMajorities returns all current PCR majorities keyed by "groupingKey|pcrGroup".
+func (s *CensusStore) GetAllPCRMajorities(ctx context.Context) (map[string]*model.PCRCensus, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, grouping_key, pcr_group, pcr_composite_hash, pcr_values, device_count, is_majority, first_seen_at, last_seen_at
+		FROM pcr_census WHERE is_majority = TRUE
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("get all pcr majorities: %w", err)
+	}
+	defer rows.Close()
+
+	result := make(map[string]*model.PCRCensus)
+	for rows.Next() {
+		p, err := scanPCRCensus(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan pcr majority: %w", err)
+		}
+		key := model.PCRMajorityKey(p.GroupingKey, p.PCRGroup)
+		result[key] = p
+	}
+	return result, rows.Err()
+}
+
 // GetDistinctPCRGroups returns distinct (grouping_key, pcr_group) pairs for recalculation.
 func (s *CensusStore) GetDistinctPCRGroups(ctx context.Context) ([][2]string, error) {
 	rows, err := s.pool.Query(ctx, `SELECT DISTINCT grouping_key, pcr_group FROM pcr_census`)

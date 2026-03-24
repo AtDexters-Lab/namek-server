@@ -78,6 +78,14 @@ type PCRCensus struct {
 	LastSeenAt       time.Time         `json:"last_seen_at"`
 }
 
+// AllPCRGroups lists all PCR groups in evaluation order.
+var AllPCRGroups = []PCRGroup{PCRGroupFirmware, PCRGroupBoot, PCRGroupOS}
+
+// PCRMajorityKey returns the canonical map key for a (groupingKey, pcrGroup) pair.
+func PCRMajorityKey(groupingKey string, group PCRGroup) string {
+	return groupingKey + "|" + string(group)
+}
+
 // PCRConsensusStatus represents the result of comparing a device's PCR values against the census.
 type PCRConsensusStatus string
 

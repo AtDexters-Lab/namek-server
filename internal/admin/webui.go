@@ -10,6 +10,12 @@ import (
 	"net/url"
 	"strconv"
 	"time"
+
+	"github.com/gin-gonic/gin"
+
+	"github.com/AtDexters-Lab/namek-server/internal/api/handler"
+	"github.com/AtDexters-Lab/namek-server/internal/service"
+	"github.com/AtDexters-Lab/namek-server/internal/store"
 )
 
 // index.html is powerdns-webui by james-stevens (GPL-3.0).
@@ -19,9 +25,22 @@ import (
 //go:embed index.html
 var indexHTML []byte
 
-// NewHandler returns an http.Handler that serves the powerdns-webui at /
-// and reverse-proxies /api/ requests to the PowerDNS API.
-func NewHandler(pdnsAPIURL, pdnsAPIKey string, logger *slog.Logger) (http.Handler, error) {
+// OperatorDeps holds dependencies for operator API endpoints on the admin server.
+type OperatorDeps struct {
+	CensusStore   *store.CensusStore
+	DeviceStore   *store.DeviceStore
+	AuditStore    *store.AuditStore
+	RecoveryStore *store.RecoveryStore
+	AccountStore  *store.AccountStore
+	CensusSvc     *service.CensusService
+	RecoverySvc   *service.RecoveryService
+}
+
+// NewHandler returns an http.Handler that serves the powerdns-webui at /,
+// reverse-proxies /api/ requests to the PowerDNS API, and mounts operator
+// endpoints under /operator/ (census, recovery, trust management).
+// adminAddr is the configured listen address (e.g., "127.0.0.1:8056") for CSRF origin validation.
+func NewHandler(pdnsAPIURL, pdnsAPIKey string, adminAddr string, logger *slog.Logger, operatorDeps *OperatorDeps) (http.Handler, error) {
 	target, err := url.Parse(pdnsAPIURL)
 	if err != nil {
 		return nil, fmt.Errorf("admin: invalid PowerDNS API URL %q: %w", pdnsAPIURL, err)
@@ -68,7 +87,76 @@ func NewHandler(pdnsAPIURL, pdnsAPIKey string, logger *slog.Logger) (http.Handle
 	}
 	mux.Handle("/api/", proxy)
 
+	// Operator API endpoints (census, recovery, trust management)
+	if operatorDeps != nil {
+		gin.SetMode(gin.ReleaseMode)
+		g := gin.New()
+		g.Use(gin.Recovery())
+		// CSRF protection: reject cross-origin mutation requests.
+		// Allow origins matching the configured admin address (loopback or internal network).
+		allowedOrigins := buildAllowedOrigins(adminAddr)
+		g.Use(func(c *gin.Context) {
+			if c.Request.Method != "GET" && c.Request.Method != "HEAD" {
+				origin := c.GetHeader("Origin")
+				if origin != "" && !allowedOrigins[origin] {
+					c.AbortWithStatusJSON(403, gin.H{"error": "cross-origin requests denied"})
+					return
+				}
+			}
+			c.Next()
+		})
+
+		censusH := handler.NewCensusHandler(operatorDeps.CensusStore, operatorDeps.DeviceStore, operatorDeps.AuditStore, operatorDeps.CensusSvc, logger)
+		recoveryH := handler.NewRecoveryHandler(operatorDeps.RecoverySvc, operatorDeps.RecoveryStore, operatorDeps.AccountStore, operatorDeps.AuditStore, logger)
+
+		op := g.Group("/operator/v1")
+		{
+			// Census
+			op.GET("/census/issuers", censusH.ListIssuers)
+			op.GET("/census/issuers/:fingerprint", censusH.GetIssuer)
+			op.POST("/census/issuers/:fingerprint/flag", censusH.FlagIssuer)
+			op.POST("/census/issuers/:fingerprint/override", censusH.OverrideIssuerTier)
+			op.GET("/census/pcr", censusH.ListPCRClusters)
+			op.GET("/census/pcr/:grouping_key", censusH.GetPCRClusters)
+
+			// Device trust
+			op.POST("/devices/:id/trust-override", censusH.TrustOverride)
+			op.DELETE("/devices/:id/trust-override", censusH.ClearTrustOverride)
+			op.GET("/devices/:id/trust-explain", censusH.TrustExplain)
+
+			// Recovery
+			op.GET("/recovery/accounts", recoveryH.ListPendingAccounts)
+			op.GET("/recovery/accounts/:id", recoveryH.GetAccountStatus)
+			op.POST("/recovery/accounts/:id/override", recoveryH.OverrideAccount)
+			op.POST("/recovery/accounts/:id/dissolve", recoveryH.DissolveAccount)
+		}
+
+		mux.Handle("/operator/", g)
+	}
+
 	return withLogging(mux, logger), nil
+}
+
+// buildAllowedOrigins returns a set of permitted Origin values for CSRF checks,
+// derived from the configured admin listen address.
+func buildAllowedOrigins(adminAddr string) map[string]bool {
+	origins := map[string]bool{
+		"http://127.0.0.1:8056": true,
+		"http://localhost:8056":  true,
+	}
+	// Parse the configured address to allow its origin
+	host, port, err := net.SplitHostPort(adminAddr)
+	if err == nil {
+		if host == "" || host == "0.0.0.0" || host == "::" {
+			// Wildcard bind — allow localhost variants only
+			origins["http://127.0.0.1:"+port] = true
+			origins["http://localhost:"+port] = true
+		} else {
+			origins["http://"+host+":"+port] = true
+			origins["http://"+net.JoinHostPort(host, port)] = true
+		}
+	}
+	return origins
 }
 
 // statusRecorder wraps http.ResponseWriter to capture the status code.

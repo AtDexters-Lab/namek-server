@@ -671,7 +671,7 @@ func (s *DeviceService) recordCensusObservation(ctx context.Context, pe *Pending
 	if req.OSVersion != "" {
 		osVer = &req.OSVersion
 	}
-	for _, group := range []model.PCRGroup{model.PCRGroupFirmware, model.PCRGroupBoot, model.PCRGroupOS} {
+	for _, group := range model.AllPCRGroups {
 		groupKey := PCRGroupingKey(group, &issuerFP, osVer)
 		if groupKey == "" {
 			continue
@@ -694,45 +694,13 @@ func (s *DeviceService) recordCensusObservation(ctx context.Context, pe *Pending
 }
 
 // computePCRConsensus checks the device's PCR values against census majorities.
-// Returns the worst status across all groups (majority < unknown < outlier).
 func (s *DeviceService) computePCRConsensus(ctx context.Context, pcrValues map[string]string, issuerFP *string, osVersion *string) model.PCRConsensusStatus {
-	if pcrValues == nil {
-		return model.PCRConsensusUnknown
-	}
-
-	worst := model.PCRConsensusMajority
-	checked := 0
-
-	for _, group := range []model.PCRGroup{model.PCRGroupFirmware, model.PCRGroupBoot, model.PCRGroupOS} {
-		groupKey := PCRGroupingKey(group, issuerFP, osVersion)
-		if groupKey == "" {
-			continue
-		}
-
-		hash := ComputePCRCompositeHash(pcrValues, group)
-		if hash == "" {
-			continue
-		}
-
-		majority, err := s.censusStore.GetPCRMajority(ctx, groupKey, group)
-		if err != nil || majority == nil {
-			// No majority established for this group
-			if worst == model.PCRConsensusMajority {
-				worst = model.PCRConsensusUnknown
+	return EvaluatePCRConsensus(pcrValues, issuerFP, osVersion,
+		func(gk string, group model.PCRGroup) (string, bool) {
+			m, err := s.censusStore.GetPCRMajority(ctx, gk, group)
+			if err != nil || m == nil {
+				return "", false
 			}
-			continue
-		}
-
-		checked++
-		if hash == majority.PCRCompositeHash {
-			// Matches majority — no degradation
-		} else {
-			worst = model.PCRConsensusOutlier
-		}
-	}
-
-	if checked == 0 {
-		return model.PCRConsensusUnknown
-	}
-	return worst
+			return m.PCRCompositeHash, true
+		})
 }

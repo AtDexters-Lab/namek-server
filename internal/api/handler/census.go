@@ -212,6 +212,47 @@ func (h *CensusHandler) TrustOverride(c *gin.Context) {
 	httputil.RespondOK(c, gin.H{"status": "ok"})
 }
 
+func (h *CensusHandler) ClearTrustOverride(c *gin.Context) {
+	idStr := c.Param("id")
+	deviceID, err := uuid.Parse(idStr)
+	if err != nil {
+		httputil.RespondBadRequest(c, "invalid device id")
+		return
+	}
+
+	if err := h.deviceStore.ClearTrustOverride(c.Request.Context(), deviceID); err != nil {
+		if errors.Is(err, store.ErrDeviceNotFound) {
+			httputil.RespondNotFound(c, "device not found")
+		} else {
+			h.logger.Error("clear trust override failed", "error", err)
+			httputil.RespondInternalError(c)
+		}
+		return
+	}
+
+	// Recompute the system trust level immediately so the device doesn't keep
+	// the stale manual value until the next census run.
+	device, err := h.deviceStore.GetByID(c.Request.Context(), deviceID)
+	if err == nil {
+		pcrConsensus := service.EvaluatePCRConsensus(device.PCRValues, device.IssuerFingerprint, device.OSVersion,
+			func(gk string, group model.PCRGroup) (string, bool) {
+				m, lookupErr := h.censusStore.GetPCRMajority(c.Request.Context(), gk, group)
+				if lookupErr != nil || m == nil {
+					return "", false
+				}
+				return m.PCRCompositeHash, true
+			})
+		newTrust := service.ComputeTrustLevel(device.IdentityClass, pcrConsensus)
+		_ = h.deviceStore.UpdateTrustData(c.Request.Context(), deviceID, device.IdentityClass, newTrust,
+			device.IssuerFingerprint, device.OSVersion, device.PCRValues)
+	}
+
+	h.auditStore.LogAction(c.Request.Context(), model.ActorTypeOperator, "operator",
+		"device.trust_override_cleared", "device", &idStr, nil, nil)
+
+	httputil.RespondOK(c, gin.H{"status": "ok"})
+}
+
 func (h *CensusHandler) TrustExplain(c *gin.Context) {
 	idStr := c.Param("id")
 	deviceID, err := uuid.Parse(idStr)
@@ -246,7 +287,7 @@ func (h *CensusHandler) TrustExplain(c *gin.Context) {
 
 	// PCR assessment per group
 	pcrAssessment := gin.H{}
-	for _, group := range []model.PCRGroup{model.PCRGroupFirmware, model.PCRGroupBoot, model.PCRGroupOS} {
+	for _, group := range model.AllPCRGroups {
 		groupKey := service.PCRGroupingKey(group, device.IssuerFingerprint, device.OSVersion)
 
 		entry := gin.H{"status": "unknown", "cluster_size": 0, "group_key": groupKey}
@@ -270,6 +311,7 @@ func (h *CensusHandler) TrustExplain(c *gin.Context) {
 	httputil.RespondOK(c, gin.H{
 		"device_id":      device.ID,
 		"trust_level":    device.TrustLevel,
+		"overridden":     device.TrustLevelOverride != nil,
 		"ek_assessment":  ekAssessment,
 		"pcr_assessment": pcrAssessment,
 	})

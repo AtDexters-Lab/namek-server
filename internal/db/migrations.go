@@ -37,6 +37,8 @@ var migrations = []string{
 		pcr_values JSONB,
 		trust_level TEXT NOT NULL DEFAULT 'provisional'
 			CHECK (trust_level IN ('strong','standard','provisional','suspicious','quarantine','software')),
+		trust_level_override TEXT
+			CHECK (trust_level_override IS NULL OR trust_level_override IN ('strong','standard','provisional','suspicious','quarantine','software')),
 		ip_address INET,
 		timezone TEXT,
 		status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'suspended', 'revoked')),

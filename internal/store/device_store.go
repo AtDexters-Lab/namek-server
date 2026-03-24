@@ -33,7 +33,7 @@ func NewDeviceStore(pool *pgxpool.Pool) *DeviceStore {
 // host() extracts the bare IP from inet, avoiding CIDR notation (e.g. "1.2.3.4/32")
 // that net.ParseIP cannot parse.
 const deviceColumns = `id, account_id, slug, hostname, custom_hostname, identity_class, ek_fingerprint, ek_cert_der, ak_public_key,
-		       issuer_fingerprint, os_version, pcr_values, trust_level,
+		       issuer_fingerprint, os_version, pcr_values, trust_level, trust_level_override,
 		       host(ip_address), timezone, status,
 		       hostname_changes_this_year, hostname_year, last_hostname_change_at,
 		       voucher_pending_since,
@@ -45,7 +45,7 @@ func scanDevice(row pgx.Row) (*model.Device, error) {
 	var pcrValuesJSON []byte
 	err := row.Scan(
 		&d.ID, &d.AccountID, &d.Slug, &d.Hostname, &d.CustomHostname, &d.IdentityClass, &d.EKFingerprint, &d.EKCertDER, &d.AKPublicKey,
-		&d.IssuerFingerprint, &d.OSVersion, &pcrValuesJSON, &d.TrustLevel,
+		&d.IssuerFingerprint, &d.OSVersion, &pcrValuesJSON, &d.TrustLevel, &d.TrustLevelOverride,
 		&ipAddr, &d.Timezone, &d.Status,
 		&d.HostnameChangesThisYear, &d.HostnameYear, &d.LastHostnameChangeAt,
 		&d.VoucherPendingSince,
@@ -265,10 +265,24 @@ func (s *DeviceStore) Delete(ctx context.Context, id uuid.UUID) error {
 	return nil
 }
 
+// UpdateTrustLevel sets both trust_level and trust_level_override (operator override).
+// The override prevents system-computed trust from overwriting the operator's decision.
 func (s *DeviceStore) UpdateTrustLevel(ctx context.Context, id uuid.UUID, trustLevel model.TrustLevel) error {
-	tag, err := s.pool.Exec(ctx, `UPDATE devices SET trust_level = $1 WHERE id = $2`, trustLevel, id)
+	tag, err := s.pool.Exec(ctx, `UPDATE devices SET trust_level = $1, trust_level_override = $1 WHERE id = $2`, trustLevel, id)
 	if err != nil {
 		return fmt.Errorf("update trust level: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrDeviceNotFound
+	}
+	return nil
+}
+
+// ClearTrustOverride removes the operator override, allowing system-computed trust to take effect.
+func (s *DeviceStore) ClearTrustOverride(ctx context.Context, id uuid.UUID) error {
+	tag, err := s.pool.Exec(ctx, `UPDATE devices SET trust_level_override = NULL WHERE id = $1`, id)
+	if err != nil {
+		return fmt.Errorf("clear trust override: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
 		return ErrDeviceNotFound
@@ -288,8 +302,11 @@ func (s *DeviceStore) UpdateIdentityClass(ctx context.Context, id uuid.UUID, ide
 }
 
 func (s *DeviceStore) UpdateTrustData(ctx context.Context, id uuid.UUID, identityClass string, trustLevel model.TrustLevel, issuerFP *string, osVersion *string, pcrValues map[string]string) error {
+	// Only update trust_level if not operator-overridden
 	_, err := s.pool.Exec(ctx, `
-		UPDATE devices SET identity_class = $1, trust_level = $2, issuer_fingerprint = $3, os_version = $4, pcr_values = $5 WHERE id = $6
+		UPDATE devices SET identity_class = $1,
+			trust_level = CASE WHEN trust_level_override IS NULL THEN $2::text ELSE trust_level END,
+			issuer_fingerprint = $3, os_version = $4, pcr_values = $5 WHERE id = $6
 	`, identityClass, trustLevel, issuerFP, osVersion, pcrValuesToJSON(pcrValues), id)
 	if err != nil {
 		return fmt.Errorf("update trust data: %w", err)

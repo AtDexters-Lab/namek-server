@@ -252,11 +252,7 @@ func main() {
 		VoucherSvc:   voucherSvc,
 		DeviceStore:   stores.Device,
 		AccountStore:  stores.Account,
-		RecoverySvc:   recoverySvc,
-		RecoveryStore: stores.Recovery,
 		AuditStore:    stores.Audit,
-		CensusStore:   stores.Census,
-		CensusSvc:     censusSvc,
 		Pool:          pool,
 		PowerDNS:      pdns,
 	})
@@ -355,7 +351,15 @@ func main() {
 	// Admin server (PowerDNS web UI + API proxy)
 	var adminServer *http.Server
 	if cfg.AdminAddress != "" {
-		adminHandler, err := admin.NewHandler(cfg.PowerDNS.ApiURL, cfg.PowerDNS.ApiKey, logger)
+		adminHandler, err := admin.NewHandler(cfg.PowerDNS.ApiURL, cfg.PowerDNS.ApiKey, cfg.AdminAddress, logger, &admin.OperatorDeps{
+			CensusStore:   stores.Census,
+			DeviceStore:   stores.Device,
+			AuditStore:    stores.Audit,
+			RecoveryStore: stores.Recovery,
+			AccountStore:  stores.Account,
+			CensusSvc:     censusSvc,
+			RecoverySvc:   recoverySvc,
+		})
 		if err != nil {
 			logger.Error("failed to create admin handler", "error", err)
 			os.Exit(1)

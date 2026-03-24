@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net"
@@ -93,6 +94,9 @@ func (s *CensusService) Analyze(ctx context.Context) error {
 	if err := s.recalculatePCRMajorities(ctx); err != nil {
 		s.logger.Error("PCR majority recalculation failed", "error", err)
 	}
+	if err := s.recomputeDeviceTrustLevels(ctx); err != nil {
+		s.logger.Error("device trust level recomputation failed", "error", err)
+	}
 
 	s.logger.Info("census analysis completed", "duration_ms", time.Since(start).Milliseconds())
 	return nil
@@ -138,11 +142,16 @@ func (s *CensusService) reEvaluateIssuerTiers(ctx context.Context) error {
 		if issuer.StructuralComplianceScore == nil || float64(*issuer.StructuralComplianceScore) < ftCfg.CAPromotionMinCompliance {
 			continue
 		}
-		if issuer.IssuerIsCA == nil || !*issuer.IssuerIsCA {
-			continue
-		}
-		if issuer.IssuerHasCertSign == nil || !*issuer.IssuerHasCertSign {
-			continue
+		// Validate issuer CA properties when available (from a prior Tier 1 enrollment
+		// of the same issuer). When unavailable (IssuerPublicKeyDER is nil), skip —
+		// fleet observation criteria provide sufficient anti-Sybil protection.
+		if issuer.IssuerPublicKeyDER != nil {
+			if issuer.IssuerIsCA == nil || !*issuer.IssuerIsCA {
+				continue
+			}
+			if issuer.IssuerHasCertSign == nil || !*issuer.IssuerHasCertSign {
+				continue
+			}
 		}
 
 		// Promote
@@ -161,12 +170,12 @@ func (s *CensusService) reEvaluateIssuerTiers(ctx context.Context) error {
 			"subnets", stats.DistinctSubnets,
 		)
 
-		// Cascade: upgrade identity_class and trust_level for affected devices
-		// Only touch devices that were actually unverified_hw for this issuer
+		// Cascade: upgrade identity_class for affected devices.
+		// Trust level is recomputed by recomputeDeviceTrustLevels which runs next.
 		tag, err := s.pool.Exec(ctx, `
-			UPDATE devices SET identity_class = $1, trust_level = $2
-			WHERE issuer_fingerprint = $3 AND identity_class = $4
-		`, tpm.IdentityClassCrowdCorroborated, model.TrustLevelStandard,
+			UPDATE devices SET identity_class = $1
+			WHERE issuer_fingerprint = $2 AND identity_class = $3
+		`, tpm.IdentityClassCrowdCorroborated,
 			issuer.IssuerFingerprint, tpm.IdentityClassUnverifiedHW)
 		if err != nil {
 			s.logger.Error("cascade identity class failed", "fingerprint", issuer.IssuerFingerprint, "error", err)
@@ -191,7 +200,7 @@ func (s *CensusService) recalculatePCRMajorities(ctx context.Context) error {
 	}
 	counts := make(map[clusterKey]int)
 	for _, d := range devices {
-		for _, group := range []model.PCRGroup{model.PCRGroupFirmware, model.PCRGroupBoot, model.PCRGroupOS} {
+		for _, group := range model.AllPCRGroups {
 			gk := PCRGroupingKey(group, d.IssuerFingerprint, d.OSVersion)
 			if gk == "" {
 				continue
@@ -252,6 +261,82 @@ func (s *CensusService) recalculatePCRMajorities(ctx context.Context) error {
 	return nil
 }
 
+// recomputeDeviceTrustLevels recalculates trust_level for all non-overridden devices
+// using the full trust matrix (identity_class × PCR consensus).
+func (s *CensusService) recomputeDeviceTrustLevels(ctx context.Context) error {
+	// Pre-fetch all PCR majorities to avoid N+1 queries during device iteration
+	majorities, err := s.censusStore.GetAllPCRMajorities(ctx)
+	if err != nil {
+		return fmt.Errorf("pre-fetch pcr majorities: %w", err)
+	}
+
+	// Collect all non-overridden active devices (close rows before issuing updates)
+	type deviceTrust struct {
+		id            string
+		identityClass string
+		issuerFP      *string
+		osVersion     *string
+		pcrValuesJSON []byte
+		trustLevel    string
+	}
+
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, identity_class, issuer_fingerprint, os_version, pcr_values, trust_level
+		FROM devices WHERE status = 'active' AND trust_level_override IS NULL
+	`)
+	if err != nil {
+		return fmt.Errorf("query active devices: %w", err)
+	}
+
+	var devices []deviceTrust
+	for rows.Next() {
+		var d deviceTrust
+		if err := rows.Scan(&d.id, &d.identityClass, &d.issuerFP, &d.osVersion, &d.pcrValuesJSON, &d.trustLevel); err != nil {
+			s.logger.Warn("scan device for trust recompute failed", "error", err)
+			continue
+		}
+		devices = append(devices, d)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate devices: %w", err)
+	}
+
+	// Recompute trust for each device using pre-fetched majorities
+	updated := 0
+	for _, d := range devices {
+		var pcrValues map[string]string
+		if len(d.pcrValuesJSON) > 0 {
+			if err := json.Unmarshal(d.pcrValuesJSON, &pcrValues); err != nil {
+				s.logger.Warn("corrupt pcr_values JSON", "device_id", d.id, "error", err)
+			}
+		}
+
+		pcrConsensus := EvaluatePCRConsensus(pcrValues, d.issuerFP, d.osVersion,
+			func(gk string, group model.PCRGroup) (string, bool) {
+				m, ok := majorities[model.PCRMajorityKey(gk, group)]
+				if !ok {
+					return "", false
+				}
+				return m.PCRCompositeHash, true
+			})
+
+		newTrust := string(ComputeTrustLevel(d.identityClass, pcrConsensus))
+		if newTrust != d.trustLevel {
+			if _, err := s.pool.Exec(ctx, `UPDATE devices SET trust_level = $1 WHERE id = $2 AND trust_level_override IS NULL`, newTrust, d.id); err != nil {
+				s.logger.Warn("update device trust level failed", "device_id", d.id, "error", err)
+			} else {
+				updated++
+			}
+		}
+	}
+
+	if updated > 0 {
+		s.logger.Info("recomputed device trust levels", "updated", updated)
+	}
+	return nil
+}
+
 // ComputeTrustLevel implements the trust matrix from RFC 003.
 func ComputeTrustLevel(identityClass string, pcrConsensus model.PCRConsensusStatus) model.TrustLevel {
 	switch identityClass {
@@ -276,6 +361,46 @@ func ComputeTrustLevel(identityClass string, pcrConsensus model.PCRConsensusStat
 	default:
 		return model.TrustLevelProvisional
 	}
+}
+
+// EvaluatePCRConsensus determines PCR consensus for a device by checking its PCR values
+// against majority data. The lookupMajority function returns (compositeHash, found) for a given key/group.
+func EvaluatePCRConsensus(
+	pcrValues map[string]string,
+	issuerFP, osVersion *string,
+	lookupMajority func(groupKey string, group model.PCRGroup) (string, bool),
+) model.PCRConsensusStatus {
+	if pcrValues == nil {
+		return model.PCRConsensusUnknown
+	}
+
+	worst := model.PCRConsensusMajority
+	checked := 0
+	for _, group := range model.AllPCRGroups {
+		gk := PCRGroupingKey(group, issuerFP, osVersion)
+		if gk == "" {
+			continue
+		}
+		hash := ComputePCRCompositeHash(pcrValues, group)
+		if hash == "" {
+			continue
+		}
+		majorityHash, found := lookupMajority(gk, group)
+		if !found {
+			if worst == model.PCRConsensusMajority {
+				worst = model.PCRConsensusUnknown
+			}
+			continue
+		}
+		checked++
+		if hash != majorityHash {
+			worst = model.PCRConsensusOutlier
+		}
+	}
+	if checked == 0 {
+		return model.PCRConsensusUnknown
+	}
+	return worst
 }
 
 // EncodePCRValues converts raw PCR digests to hex-encoded strings for storage.

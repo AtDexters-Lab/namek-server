@@ -33,13 +33,9 @@ type RouterDeps struct {
 	DomainSvc   *service.DomainService
 	AccountSvc    *service.AccountService
 	VoucherSvc    *service.VoucherService
-	RecoverySvc   *service.RecoveryService
-	RecoveryStore *store.RecoveryStore
 	AuditStore    *store.AuditStore
 	DeviceStore  *store.DeviceStore
 	AccountStore *store.AccountStore
-	CensusStore  *store.CensusStore
-	CensusSvc    *service.CensusService
 	Pool         *pgxpool.Pool
 	PowerDNS    *dns.PowerDNSClient
 }
@@ -65,7 +61,6 @@ func NewRouter(deps RouterDeps) http.Handler {
 	tokenH := handler.NewTokenHandler(deps.TokenSvc, deps.Logger)
 	verifyH := handler.NewVerifyHandler(deps.TokenSvc)
 	nexusH := handler.NewNexusRegisterHandler(deps.NexusSvc, deps.Logger)
-	recoveryH := handler.NewRecoveryHandler(deps.RecoverySvc, deps.RecoveryStore, deps.AccountStore, deps.AuditStore, deps.Logger)
 	acmeH := handler.NewACMEHandler(deps.ACMESvc, deps.Logger)
 
 	// System endpoints (no auth)
@@ -162,26 +157,8 @@ func NewRouter(deps RouterDeps) http.Handler {
 		internal.POST("/nexus/register", nexusH.Register)
 	}
 
-	// Recovery observability endpoints (under NexusAuth — same mTLS requirement as nexus registration)
-	internal.GET("/recovery/accounts", recoveryH.ListPendingAccounts)
-	internal.GET("/recovery/accounts/:id", recoveryH.GetAccountStatus)
-	internal.POST("/recovery/accounts/:id/override", recoveryH.OverrideAccount)
-	internal.POST("/recovery/accounts/:id/dissolve", recoveryH.DissolveAccount)
-
-	// Census/operator endpoints (no auth — protected by network-level access)
-	// Separate route group from NexusAuth; paths don't overlap with /nexus/* or /recovery/*
-	censusH := handler.NewCensusHandler(deps.CensusStore, deps.DeviceStore, deps.AuditStore, deps.CensusSvc, deps.Logger)
-	census := r.Group("/internal/v1")
-	{
-		census.GET("/census/issuers", censusH.ListIssuers)
-		census.GET("/census/issuers/:fingerprint", censusH.GetIssuer)
-		census.POST("/census/issuers/:fingerprint/flag", censusH.FlagIssuer)
-		census.POST("/census/issuers/:fingerprint/override", censusH.OverrideIssuerTier)
-		census.GET("/census/pcr", censusH.ListPCRClusters)
-		census.GET("/census/pcr/:grouping_key", censusH.GetPCRClusters)
-		census.POST("/devices/:id/trust-override", censusH.TrustOverride)
-		census.GET("/devices/:id/trust-explain", censusH.TrustExplain)
-	}
+	// Operator endpoints (census, recovery, trust) are on the admin listener,
+	// not the public HTTPS listener. See internal/admin/webui.go.
 
 	return r
 }

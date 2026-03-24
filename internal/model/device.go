@@ -29,6 +29,7 @@ type Device struct {
 	OSVersion         *string           `json:"os_version,omitempty"`
 	PCRValues         map[string]string `json:"pcr_values,omitempty"`
 	TrustLevel        TrustLevel        `json:"trust_level"`
+	TrustLevelOverride *TrustLevel      `json:"trust_level_override,omitempty"`
 	IPAddress         net.IP            `json:"ip_address,omitempty"`
 	Timezone          *string           `json:"timezone,omitempty"`
 	Status            DeviceStatus      `json:"status"`
