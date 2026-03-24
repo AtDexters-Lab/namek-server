@@ -32,6 +32,11 @@ var migrations = []string{
 		ek_fingerprint TEXT NOT NULL UNIQUE,
 		ek_cert_der BYTEA,
 		ak_public_key BYTEA NOT NULL,
+		issuer_fingerprint TEXT,
+		os_version TEXT,
+		pcr_values JSONB,
+		trust_level TEXT NOT NULL DEFAULT 'provisional'
+			CHECK (trust_level IN ('strong','standard','provisional','suspicious','quarantine','software')),
 		ip_address INET,
 		timezone TEXT,
 		status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'suspended', 'revoked')),
@@ -170,7 +175,56 @@ var migrations = []string{
 	CREATE INDEX IF NOT EXISTS idx_recovery_claims_account_attributed ON recovery_claims(claimed_account_id, attributed);
 	CREATE INDEX IF NOT EXISTS idx_recovery_claims_device ON recovery_claims(device_id);
 	CREATE INDEX IF NOT EXISTS idx_recovery_claims_issuer ON recovery_claims(issuer_ek_fingerprint)
-		WHERE attributed = FALSE;`,
+		WHERE attributed = FALSE;
+
+	CREATE TABLE IF NOT EXISTS ek_issuer_census (
+		id                          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+		issuer_fingerprint          TEXT NOT NULL UNIQUE,
+		issuer_subject              TEXT NOT NULL,
+		issuer_public_key_der       BYTEA,
+		issuer_is_ca                BOOLEAN,
+		issuer_has_certsign         BOOLEAN,
+		device_count                INT NOT NULL DEFAULT 0,
+		distinct_subnet_count       INT NOT NULL DEFAULT 0,
+		structural_compliance_score REAL,
+		tier                        TEXT NOT NULL DEFAULT 'unverified'
+			CHECK (tier IN ('seed', 'crowd_corroborated', 'unverified')),
+		first_seen_at               TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		last_seen_at                TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		flagged                     BOOLEAN NOT NULL DEFAULT FALSE,
+		flagged_reason              TEXT,
+		created_at                  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_ek_issuer_census_tier ON ek_issuer_census(tier);
+
+	CREATE TABLE IF NOT EXISTS ek_issuer_observations (
+		id                  BIGSERIAL PRIMARY KEY,
+		issuer_fingerprint  TEXT NOT NULL REFERENCES ek_issuer_census(issuer_fingerprint),
+		device_id           UUID NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+		client_ip_subnet    TEXT NOT NULL,
+		observed_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		UNIQUE(issuer_fingerprint, device_id)
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_ek_issuer_observations_fingerprint
+		ON ek_issuer_observations(issuer_fingerprint);
+
+	CREATE TABLE IF NOT EXISTS pcr_census (
+		id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+		grouping_key        TEXT NOT NULL,
+		pcr_group           TEXT NOT NULL CHECK (pcr_group IN ('firmware', 'boot', 'os')),
+		pcr_composite_hash  TEXT NOT NULL,
+		pcr_values          JSONB NOT NULL,
+		device_count        INT NOT NULL DEFAULT 0,
+		is_majority         BOOLEAN NOT NULL DEFAULT FALSE,
+		first_seen_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		last_seen_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		UNIQUE(grouping_key, pcr_group, pcr_composite_hash)
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_pcr_census_majority
+		ON pcr_census(grouping_key, pcr_group) WHERE is_majority = TRUE;`,
 }
 
 func Migrate(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger) error {

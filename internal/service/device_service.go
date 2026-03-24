@@ -52,6 +52,7 @@ type PendingEnrollment struct {
 	ChallengeSecret  []byte
 	IdentityClass    string
 	EKFingerprint    string
+	EKVerifyResult   *tpm.EKVerifyResult
 	ClientIP         net.IP
 	ExpiresAt        time.Time
 	ExistingDeviceID *uuid.UUID // non-nil for re-enrollment of active devices
@@ -68,6 +69,7 @@ type DeviceService struct {
 	deviceStore       *store.DeviceStore
 	accountStore      *store.AccountStore
 	auditStore        *store.AuditStore
+	censusStore       *store.CensusStore
 	pool              *pgxpool.Pool
 	cfg               *config.Config
 	logger            *slog.Logger
@@ -80,7 +82,7 @@ type DeviceService struct {
 	ekIndex map[string]string             // ek_fingerprint -> nonce (for dedup)
 }
 
-func NewDeviceService(deviceStore *store.DeviceStore, accountStore *store.AccountStore, auditStore *store.AuditStore, pool *pgxpool.Pool, cfg *config.Config, logger *slog.Logger) *DeviceService {
+func NewDeviceService(deviceStore *store.DeviceStore, accountStore *store.AccountStore, auditStore *store.AuditStore, censusStore *store.CensusStore, pool *pgxpool.Pool, cfg *config.Config, logger *slog.Logger) *DeviceService {
 	reserved := map[string]bool{
 		"relay": true, "namek": true, "www": true, "mail": true,
 		"admin": true, "api": true, "internal": true,
@@ -104,6 +106,7 @@ func NewDeviceService(deviceStore *store.DeviceStore, accountStore *store.Accoun
 		deviceStore:       deviceStore,
 		accountStore:      accountStore,
 		auditStore:        auditStore,
+		censusStore:       censusStore,
 		pool:              pool,
 		cfg:               cfg,
 		logger:            logger,
@@ -132,7 +135,7 @@ type EnrollResponse struct {
 
 func (s *DeviceService) StartEnrollment(ctx context.Context, req EnrollRequest, verifier tpm.Verifier) (*EnrollResponse, error) {
 	// Verify EK cert and classify
-	identityClass, ekPubKey, err := verifier.VerifyEKCert(req.EKCertDER)
+	ekResult, err := verifier.VerifyEKCert(req.EKCertDER)
 	if err != nil {
 		return nil, fmt.Errorf("ek verification failed: %w", err)
 	}
@@ -166,7 +169,7 @@ func (s *DeviceService) StartEnrollment(ctx context.Context, req EnrollRequest, 
 	}
 
 	// Make credential (encrypt secret for the TPM)
-	encCredential, err := verifier.MakeCredential(ekPubKey, akName, secret)
+	encCredential, err := verifier.MakeCredential(ekResult.EKPubKey, akName, secret)
 	if err != nil {
 		return nil, fmt.Errorf("make credential: %w", err)
 	}
@@ -194,13 +197,14 @@ func (s *DeviceService) StartEnrollment(ctx context.Context, req EnrollRequest, 
 	}
 
 	pe := &PendingEnrollment{
-		EKPubKey:         ekPubKey,
+		EKPubKey:         ekResult.EKPubKey,
 		EKCertDER:        req.EKCertDER,
 		AKPubKeyDER:      akPubKeyDER,
 		AKName:           akName,
 		ChallengeSecret:  secret,
-		IdentityClass:    identityClass,
+		IdentityClass:    ekResult.IdentityClass,
 		EKFingerprint:    ekFingerprint,
+		EKVerifyResult:   ekResult,
 		ClientIP:         req.ClientIP,
 		ExpiresAt:        time.Now().Add(s.cfg.PendingEnrollmentTTL()),
 		ExistingDeviceID: existingDeviceID,
@@ -211,7 +215,7 @@ func (s *DeviceService) StartEnrollment(ctx context.Context, req EnrollRequest, 
 
 	s.logger.Info("enrollment started",
 		"ek_fingerprint", ekFingerprint,
-		"identity_class", identityClass,
+		"identity_class", ekResult.IdentityClass,
 		"client_ip", req.ClientIP,
 	)
 
@@ -225,6 +229,8 @@ type AttestRequest struct {
 	Nonce          string
 	Secret         []byte
 	QuoteB64       string
+	OSVersion      string
+	PCRValues      map[int][]byte
 	ClientIP       net.IP
 	RecoveryBundle *RecoveryBundle // optional, for recovery enrollment
 }
@@ -233,6 +239,7 @@ type AttestResponse struct {
 	DeviceID       uuid.UUID `json:"device_id"`
 	Hostname       string    `json:"hostname"`
 	IdentityClass  string    `json:"identity_class"`
+	TrustLevel     string    `json:"trust_level"`
 	NexusEndpoints []string  `json:"nexus_endpoints"`
 	Reenrolled     bool      `json:"reenrolled,omitempty"`
 	// Recovery replay hints — returned when recovery_bundle was processed,
@@ -266,10 +273,36 @@ func (s *DeviceService) CompleteEnrollment(ctx context.Context, req AttestReques
 		return nil, ErrSecretMismatch
 	}
 
-	// Verify TPM quote
-	if _, err := verifier.VerifyQuote(pe.AKPubKeyDER, req.Nonce, req.QuoteB64, nil); err != nil {
+	// Verify TPM quote (with PCR validation if provided)
+	if _, err := verifier.VerifyQuote(pe.AKPubKeyDER, req.Nonce, req.QuoteB64, req.PCRValues); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrQuoteVerification, err)
 	}
+
+	// Resolve identity class (check for census-based promotion)
+	identityClass := pe.IdentityClass
+	if identityClass == tpm.IdentityClassUnverifiedHW && pe.EKVerifyResult != nil {
+		issuer, err := s.censusStore.GetIssuerByFingerprint(ctx, pe.EKVerifyResult.IssuerFingerprint)
+		if err == nil && issuer.Tier == model.IssuerTierCrowdCorroborated {
+			identityClass = tpm.IdentityClassCrowdCorroborated
+		}
+	}
+
+	// Prepare PCR values for storage
+	pcrValuesJSON := EncodePCRValues(req.PCRValues)
+
+	// Prepare issuer fingerprint and OS version pointers
+	var issuerFP *string
+	if pe.EKVerifyResult != nil && pe.EKVerifyResult.IssuerFingerprint != "" {
+		issuerFP = &pe.EKVerifyResult.IssuerFingerprint
+	}
+	var osVersion *string
+	if req.OSVersion != "" {
+		osVersion = &req.OSVersion
+	}
+
+	// Compute trust level by querying PCR consensus
+	pcrConsensus := s.computePCRConsensus(ctx, pcrValuesJSON, issuerFP, osVersion)
+	trustLevel := ComputeTrustLevel(identityClass, pcrConsensus)
 
 	// Re-enrollment path: update AK on existing active device
 	if pe.ExistingDeviceID != nil {
@@ -283,6 +316,13 @@ func (s *DeviceService) CompleteEnrollment(ctx context.Context, req AttestReques
 		if err := s.deviceStore.UpdateAKPublicKey(ctx, device.ID, pe.AKPubKeyDER); err != nil {
 			return nil, fmt.Errorf("update ak: %w", err)
 		}
+		// Update trust data on re-enrollment
+		if err := s.deviceStore.UpdateTrustData(ctx, device.ID, identityClass, trustLevel, issuerFP, osVersion, pcrValuesJSON); err != nil {
+			s.logger.Warn("update trust data on re-enrollment failed (non-blocking)", "device_id", device.ID, "error", err)
+		}
+
+		// Census observation recording (non-blocking, device already exists)
+		s.recordCensusObservation(ctx, pe, req, identityClass)
 
 		s.auditStore.LogAction(ctx, model.ActorTypeDevice, device.ID.String(),
 			"device.reenrolled", "device", strPtr(device.ID.String()), nil, req.ClientIP)
@@ -316,7 +356,8 @@ func (s *DeviceService) CompleteEnrollment(ctx context.Context, req AttestReques
 		return &AttestResponse{
 			DeviceID:       device.ID,
 			Hostname:       device.Hostname,
-			IdentityClass:  device.IdentityClass,
+			IdentityClass:  identityClass,
+			TrustLevel:     string(trustLevel),
 			NexusEndpoints: nexusEndpoints,
 			Reenrolled:     true,
 		}, nil
@@ -358,16 +399,20 @@ func (s *DeviceService) CompleteEnrollment(ctx context.Context, req AttestReques
 
 	hostname := fmt.Sprintf("%s.%s", candidate, s.cfg.DNS.BaseDomain)
 	device := &model.Device{
-		ID:            deviceID,
-		AccountID:     accountID,
-		Slug:          candidate,
-		Hostname:      hostname,
-		IdentityClass: pe.IdentityClass,
-		EKFingerprint: pe.EKFingerprint,
-		EKCertDER:     pe.EKCertDER,
-		AKPublicKey:   pe.AKPubKeyDER,
-		IPAddress:     req.ClientIP,
-		Status:        model.DeviceStatusActive,
+		ID:                deviceID,
+		AccountID:         accountID,
+		Slug:              candidate,
+		Hostname:          hostname,
+		IdentityClass:     identityClass,
+		EKFingerprint:     pe.EKFingerprint,
+		EKCertDER:         pe.EKCertDER,
+		AKPublicKey:       pe.AKPubKeyDER,
+		IssuerFingerprint: issuerFP,
+		OSVersion:         osVersion,
+		PCRValues:         pcrValuesJSON,
+		TrustLevel:        trustLevel,
+		IPAddress:         req.ClientIP,
+		Status:            model.DeviceStatusActive,
 	}
 
 	if accountStatus == model.AccountStatusPendingRecovery {
@@ -402,14 +447,18 @@ func (s *DeviceService) CompleteEnrollment(ctx context.Context, req AttestReques
 
 	s.auditStore.LogAction(ctx, model.ActorTypeDevice, deviceID.String(),
 		"device.enrolled", "device", strPtr(deviceID.String()),
-		map[string]string{"identity_class": pe.IdentityClass}, req.ClientIP)
+		map[string]string{"identity_class": identityClass, "trust_level": string(trustLevel)}, req.ClientIP)
 
 	s.logger.Info("device enrolled",
 		"device_id", deviceID,
 		"hostname", hostname,
 		"slug", candidate,
-		"identity_class", pe.IdentityClass,
+		"identity_class", identityClass,
+		"trust_level", trustLevel,
 	)
+
+	// Post-enrollment: census observation recording (non-blocking, device now exists)
+	s.recordCensusObservation(ctx, pe, req, identityClass)
 
 	// Post-enrollment: process recovery bundle (non-blocking)
 	if req.RecoveryBundle != nil && s.cfg.Recovery.IsEnabled() && s.recoveryProcessor != nil {
@@ -430,7 +479,8 @@ func (s *DeviceService) CompleteEnrollment(ctx context.Context, req AttestReques
 	resp := &AttestResponse{
 		DeviceID:       deviceID,
 		Hostname:       hostname,
-		IdentityClass:  pe.IdentityClass,
+		IdentityClass:  identityClass,
+		TrustLevel:     string(trustLevel),
 		NexusEndpoints: nexusEndpoints,
 	}
 	if req.RecoveryBundle != nil {
@@ -548,4 +598,141 @@ func equalBytes(a, b []byte) bool {
 
 func strPtr(s string) *string {
 	return &s
+}
+
+// recordCensusObservation records census data after device creation.
+// Non-blocking: failures are logged but do not affect enrollment.
+func (s *DeviceService) recordCensusObservation(ctx context.Context, pe *PendingEnrollment, req AttestRequest, resolvedIdentityClass string) {
+	if pe.EKVerifyResult == nil || pe.EKVerifyResult.IssuerFingerprint == "" {
+		return
+	}
+
+	ekr := pe.EKVerifyResult
+
+	// Upsert issuer census entry
+	// Determine issuer tier and CA properties based on EK verification result
+	issuerTier := model.IssuerTierUnverified
+	if ekr.IdentityClass == tpm.IdentityClassVerified {
+		issuerTier = model.IssuerTierSeed
+	}
+
+	census := &model.EKIssuerCensus{
+		IssuerFingerprint:  ekr.IssuerFingerprint,
+		IssuerSubject:      ekr.IssuerSubject,
+		IssuerPublicKeyDER: ekr.IssuerPubKeyDER,
+		Tier:               issuerTier,
+	}
+	// Only set CA properties when we actually have issuer cert data (verified path).
+	// For unverified devices, leave nil so COALESCE preserves any existing values
+	// from a prior verified enrollment of the same issuer.
+	if ekr.IssuerPubKeyDER != nil {
+		isCA := ekr.IssuerIsCA
+		hasCertSign := ekr.IssuerHasCertSign
+		census.IssuerIsCA = &isCA
+		census.IssuerHasCertSign = &hasCertSign
+	}
+	if err := s.censusStore.UpsertIssuerCensus(ctx, census); err != nil {
+		s.logger.Warn("census: upsert issuer failed (non-blocking)", "error", err)
+		return // can't record observation without issuer row
+	}
+
+	// Compute and update structural compliance score
+	if pe.EKCertDER != nil {
+		cert, err := tpm.ParseEKCertForCompliance(pe.EKCertDER)
+		if err == nil {
+			score := tpm.ComputeStructuralCompliance(cert)
+			if err := s.censusStore.UpdateStructuralComplianceScore(ctx, ekr.IssuerFingerprint, score); err != nil {
+				s.logger.Warn("census: update compliance score failed", "error", err)
+			}
+		}
+	}
+
+	// Record observation (requires device to exist — called after device INSERT)
+	deviceID := identity.DeviceID(pe.EKFingerprint)
+	if pe.ExistingDeviceID != nil {
+		deviceID = *pe.ExistingDeviceID
+	}
+	obs := &model.EKIssuerObservation{
+		IssuerFingerprint: ekr.IssuerFingerprint,
+		DeviceID:          deviceID,
+		ClientIPSubnet:    ExtractSubnet(req.ClientIP),
+	}
+	if err := s.censusStore.UpsertObservation(ctx, obs); err != nil {
+		s.logger.Warn("census: upsert observation failed (non-blocking)", "error", err)
+	}
+
+	// Upsert PCR census rows for Tier 1-2 devices with PCR values
+	if req.PCRValues == nil || (resolvedIdentityClass != tpm.IdentityClassVerified && resolvedIdentityClass != tpm.IdentityClassCrowdCorroborated) {
+		return
+	}
+	pcrJSON := EncodePCRValues(req.PCRValues)
+	issuerFP := ekr.IssuerFingerprint
+	var osVer *string
+	if req.OSVersion != "" {
+		osVer = &req.OSVersion
+	}
+	for _, group := range []model.PCRGroup{model.PCRGroupFirmware, model.PCRGroupBoot, model.PCRGroupOS} {
+		groupKey := PCRGroupingKey(group, &issuerFP, osVer)
+		if groupKey == "" {
+			continue
+		}
+		hash := ComputePCRCompositeHash(pcrJSON, group)
+		if hash == "" {
+			continue
+		}
+		pcr := &model.PCRCensus{
+			GroupingKey:      groupKey,
+			PCRGroup:         group,
+			PCRCompositeHash: hash,
+			PCRValues:        pcrJSON,
+			DeviceCount:      1,
+		}
+		if err := s.censusStore.UpsertPCRCensus(ctx, pcr); err != nil {
+			s.logger.Warn("census: upsert pcr census failed", "group", group, "error", err)
+		}
+	}
+}
+
+// computePCRConsensus checks the device's PCR values against census majorities.
+// Returns the worst status across all groups (majority < unknown < outlier).
+func (s *DeviceService) computePCRConsensus(ctx context.Context, pcrValues map[string]string, issuerFP *string, osVersion *string) model.PCRConsensusStatus {
+	if pcrValues == nil {
+		return model.PCRConsensusUnknown
+	}
+
+	worst := model.PCRConsensusMajority
+	checked := 0
+
+	for _, group := range []model.PCRGroup{model.PCRGroupFirmware, model.PCRGroupBoot, model.PCRGroupOS} {
+		groupKey := PCRGroupingKey(group, issuerFP, osVersion)
+		if groupKey == "" {
+			continue
+		}
+
+		hash := ComputePCRCompositeHash(pcrValues, group)
+		if hash == "" {
+			continue
+		}
+
+		majority, err := s.censusStore.GetPCRMajority(ctx, groupKey, group)
+		if err != nil || majority == nil {
+			// No majority established for this group
+			if worst == model.PCRConsensusMajority {
+				worst = model.PCRConsensusUnknown
+			}
+			continue
+		}
+
+		checked++
+		if hash == majority.PCRCompositeHash {
+			// Matches majority — no degradation
+		} else {
+			worst = model.PCRConsensusOutlier
+		}
+	}
+
+	if checked == 0 {
+		return model.PCRConsensusUnknown
+	}
+	return worst
 }

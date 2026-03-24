@@ -12,6 +12,7 @@ type Stores struct {
 	Invite   *InviteStore
 	Voucher  *VoucherStore
 	Recovery *RecoveryStore
+	Census   *CensusStore
 }
 
 func New(pool *pgxpool.Pool) *Stores {
@@ -25,5 +26,6 @@ func New(pool *pgxpool.Pool) *Stores {
 		Invite:   NewInviteStore(pool),
 		Voucher:  NewVoucherStore(pool),
 		Recovery: NewRecoveryStore(pool),
+		Census:   NewCensusStore(pool),
 	}
 }

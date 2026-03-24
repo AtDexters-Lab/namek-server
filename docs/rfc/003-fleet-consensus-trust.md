@@ -14,7 +14,7 @@ Fleet-Consensus Trust replaces the binary hardware/software TPM classification w
 2. **CA census via fleet observation** — unknown issuer CAs are tracked and promoted based on population diversity, not manual intervention.
 3. **PCR census via population consensus** — expected PCR values derived from majority clusters, not pre-computed golden images. Only Tier 1-2 (Verified/Crowd-Corroborated) devices contribute to PCR census to prevent bootstrap poisoning.
 4. **PCR values as separate JSON fields** — transmitted alongside the quote in the attestation request body (not embedded in the binary wire format), preserving backward compatibility.
-5. **Combined trust score governs federation privileges** — EK tier × PCR consensus determines PSFN participation level.
+5. **Combined trust score as classification signal** — EK tier × PCR consensus determines cryptographic trust level. Downstream access policy (PSFN, federation) is governed by a separate policy engine (see RFC 005).
 6. **No breaking migration** — no active deployments; schema changes modify the v1 migration DDL in-place. Any existing dev/staging databases must be dropped and recreated.
 7. **Census analysis as background service** — periodic re-evaluation with PostgreSQL advisory lock for single-writer guarantee; non-blocking during enrollment.
 8. **SHA-256 is the assumed PCR bank** — all PCR digests are 32 bytes. Validated server-side; mismatched digest lengths are rejected.
@@ -22,7 +22,7 @@ Fleet-Consensus Trust replaces the binary hardware/software TPM classification w
 ## EK Trust Tiers
 
 **Tier 1 — Verified:**
-EK cert chains to a known manufacturer CA from the `tpm-ca-certificates` seed bundle. The seed bundle is loaded into `trustedCACertsDir` alongside any operator-supplied CAs. Full federation privileges immediately.
+EK cert chains to a known manufacturer CA from the `tpm-ca-certificates` seed bundle. The seed bundle is loaded into `trustedCACertsDir` alongside any operator-supplied CAs.
 
 **Tier 2 — Crowd-Corroborated:**
 EK cert signed by a CA not in the seed bundle, but observed across sufficient independent devices. Promotion criteria from Tier 3:
@@ -33,10 +33,10 @@ EK cert signed by a CA not in the seed bundle, but observed across sufficient in
 - Issuer certificate passes CA validation (see below)
 
 **Tier 3 — Unverified Hardware:**
-TPM credential activation succeeded (proves real TPM), but EK cert chain unverifiable and CA lacks fleet population. Default tier for newly-encountered CAs. Limited federation privileges.
+TPM credential activation succeeded (proves real TPM), but EK cert chain unverifiable and CA lacks fleet population. Default tier for newly-encountered CAs.
 
 **Tier 4 — Software:**
-EK cert chains to software CA pool (swtpm). Development/testing only, no PSFN storage participation.
+EK cert chains to software CA pool (swtpm). Includes production devices that lack hardware TPM and use swtpm as fallback.
 
 **Identity class constants:**
 ```go
@@ -144,31 +144,29 @@ When `pcrValues` is nil (legacy client): call `akPub.Verify(quote, nil, nonce)` 
 
 ## Combined Trust Assessment
 
-| EK Tier | PCR Consensus | Trust Level | Federation Privileges |
-|---------|--------------|-------------|----------------------|
-| Verified / Crowd-Corroborated | Matches majority | **Strong** | Full PSFN participation |
-| Verified / Crowd-Corroborated | Unknown (no data / insufficient population) | **Standard** | Full PSFN, elevated monitoring |
-| Verified / Crowd-Corroborated | Outlier | **Suspicious** | Investigation flag, operator alert |
-| Unverified HW | Matches majority | **Provisional** | Limited federation, higher Sybil scrutiny |
-| Unverified HW | Unknown | **Provisional** | Same as above |
-| Unverified HW | Outlier | **Quarantine** | Minimal privileges, manual review |
-| Software | Any | **Development** | No PSFN storage participation |
+| EK Tier | PCR Consensus | Trust Level |
+|---------|--------------|-------------|
+| Verified / Crowd-Corroborated | Matches majority | **Strong** |
+| Verified / Crowd-Corroborated | Unknown (no data / insufficient population) | **Standard** |
+| Verified / Crowd-Corroborated | Outlier | **Suspicious** |
+| Unverified HW | Matches majority | **Provisional** |
+| Unverified HW | Unknown | **Provisional** |
+| Unverified HW | Outlier | **Quarantine** |
+| Software | Any | **Software** |
 
 Trust level stored on device record, recalculated at enrollment, during census analysis, and on operator override.
 
-**Trust level does NOT block enrollment.** All devices complete enrollment regardless of tier. Trust level governs downstream privileges (PSFN capacity allocation, federation participation). Trust level is not currently encoded in Nexus JWTs — it is consumed by the future PSFN service which queries the device record. JWT integration is future work if needed.
+**Trust level does NOT block enrollment.** All devices complete enrollment regardless of tier. Trust level is a classification signal consumed by downstream policy systems (see RFC 005). It is not currently encoded in Nexus JWTs — it is consumed by the future PSFN policy engine which queries the device record.
 
 **Operator device-level override:** Operators can manually set any device's trust level via `POST /internal/v1/devices/:id/trust-override`. This is essential for incident response (quarantining a specific device) and for manually promoting edge-case devices.
 
-## Sybil Resistance for PSFN
+## Sybil Resistance Properties
 
-This model addresses the PSFN PRD's "Sybil safeguards (workflow pending)":
+This trust model provides foundational Sybil resistance signals that downstream policy systems can leverage:
 
 1. **Tier 1-2 Sybil cost:** Requires compromising a manufacturer CA private key or acquiring many physical devices from diverse locations — prohibitively expensive.
-2. **Tier 3 Sybil cost:** Attacker can create many swtpm instances with a self-signed CA, but anti-ballot-stuffing controls (IP diversity, temporal spread, enrollment rate) prevent CA promotion. Tier 3 gets reduced privileges.
+2. **Tier 3 Sybil cost:** Attacker can create many swtpm instances with a self-signed CA, but anti-ballot-stuffing controls (IP diversity, temporal spread, enrollment rate) prevent CA promotion.
 3. **PCR Sybil cost:** Attacker must report matching PCR values. With emulated TPMs, boot measurements reflect the emulator, not Piccolo OS — clustering as outliers. Additionally, only Tier 1-2 devices contribute to PCR census, so Tier 3-4 devices cannot influence the majority.
-4. **Capacity pledge cost:** Even if trust checks pass, PSFN requires ongoing storage/bandwidth — scaling linearly with Sybil identities.
-5. **Defense depth:** EK trust + PCR consensus + capacity pledge = three independent cost barriers.
 
 **Foundational assumption:** The fleet consensus model assumes legitimate devices outnumber compromised ones. During bootstrap (first ~50 Tier 1-2 devices), the consensus signal is weak. The minimum population thresholds (5 for PCR majority, 10 for CA promotion) provide some protection, but operators should monitor census health during early fleet growth.
 
@@ -229,7 +227,7 @@ VerifyQuote(akPubKeyDER []byte, nonce string, quoteB64 string, pcrValues map[int
 IssuerFingerprint string
 OSVersion         string
 PCRValues         map[string]string  // JSON-serialized, e.g. {"0":"abc...","4":"def..."}
-TrustLevel        TrustLevel         // strong|standard|provisional|suspicious|quarantine|development
+TrustLevel        TrustLevel         // strong|standard|provisional|suspicious|quarantine|software
 ```
 
 **Config** (`internal/config/config.go`) — new section:
@@ -314,7 +312,7 @@ All tables fold into the v1 migration (no active deployments).
   - `issuer_fingerprint TEXT`
   - `os_version TEXT`
   - `pcr_values JSONB` — device's latest PCR snapshot
-  - `trust_level TEXT NOT NULL DEFAULT 'provisional' CHECK (trust_level IN ('strong','standard','provisional','suspicious','quarantine','development'))`
+  - `trust_level TEXT NOT NULL DEFAULT 'provisional' CHECK (trust_level IN ('strong','standard','provisional','suspicious','quarantine','software'))`
 
 **`ek_issuer_census`:**
 
@@ -415,7 +413,8 @@ All promotions, demotions, flags, and trust level changes logged to `audit_log` 
 4. fTPM URL-based cert retrieval (Intel EKOP, AMD ftpm.amd.com).
 5. Operator notifications (webhook/email) for flagged CAs.
 6. Historical trust score tracking for compliance auditing.
-7. Dynamic PSFN privilege scaling based on trust level.
-8. ASN-level diversity for CA promotion criteria.
-9. Census circuit breaker / kill switch.
-10. Trust level freshness TTL — stale trust levels degrade to a safe default.
+7. ASN-level diversity for CA promotion criteria.
+8. Census circuit breaker / kill switch.
+9. Trust level freshness TTL — stale trust levels degrade to a safe default.
+
+**See also:** RFC 005 (Behavioral Trust & PSFN Access Policy) for behavioral trust scoring and downstream access policy that builds on the cryptographic trust levels defined here.

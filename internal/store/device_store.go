@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -32,6 +33,7 @@ func NewDeviceStore(pool *pgxpool.Pool) *DeviceStore {
 // host() extracts the bare IP from inet, avoiding CIDR notation (e.g. "1.2.3.4/32")
 // that net.ParseIP cannot parse.
 const deviceColumns = `id, account_id, slug, hostname, custom_hostname, identity_class, ek_fingerprint, ek_cert_der, ak_public_key,
+		       issuer_fingerprint, os_version, pcr_values, trust_level,
 		       host(ip_address), timezone, status,
 		       hostname_changes_this_year, hostname_year, last_hostname_change_at,
 		       voucher_pending_since,
@@ -40,8 +42,10 @@ const deviceColumns = `id, account_id, slug, hostname, custom_hostname, identity
 func scanDevice(row pgx.Row) (*model.Device, error) {
 	d := &model.Device{}
 	var ipAddr *string
+	var pcrValuesJSON []byte
 	err := row.Scan(
 		&d.ID, &d.AccountID, &d.Slug, &d.Hostname, &d.CustomHostname, &d.IdentityClass, &d.EKFingerprint, &d.EKCertDER, &d.AKPublicKey,
+		&d.IssuerFingerprint, &d.OSVersion, &pcrValuesJSON, &d.TrustLevel,
 		&ipAddr, &d.Timezone, &d.Status,
 		&d.HostnameChangesThisYear, &d.HostnameYear, &d.LastHostnameChangeAt,
 		&d.VoucherPendingSince,
@@ -52,6 +56,9 @@ func scanDevice(row pgx.Row) (*model.Device, error) {
 	}
 	if ipAddr != nil {
 		d.IPAddress = net.ParseIP(*ipAddr)
+	}
+	if len(pcrValuesJSON) > 0 {
+		_ = json.Unmarshal(pcrValuesJSON, &d.PCRValues)
 	}
 	return d, nil
 }
@@ -258,6 +265,46 @@ func (s *DeviceStore) Delete(ctx context.Context, id uuid.UUID) error {
 	return nil
 }
 
+func (s *DeviceStore) UpdateTrustLevel(ctx context.Context, id uuid.UUID, trustLevel model.TrustLevel) error {
+	tag, err := s.pool.Exec(ctx, `UPDATE devices SET trust_level = $1 WHERE id = $2`, trustLevel, id)
+	if err != nil {
+		return fmt.Errorf("update trust level: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrDeviceNotFound
+	}
+	return nil
+}
+
+func (s *DeviceStore) UpdateIdentityClass(ctx context.Context, id uuid.UUID, identityClass string) error {
+	tag, err := s.pool.Exec(ctx, `UPDATE devices SET identity_class = $1 WHERE id = $2`, identityClass, id)
+	if err != nil {
+		return fmt.Errorf("update identity class: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrDeviceNotFound
+	}
+	return nil
+}
+
+func (s *DeviceStore) UpdateTrustData(ctx context.Context, id uuid.UUID, identityClass string, trustLevel model.TrustLevel, issuerFP *string, osVersion *string, pcrValues map[string]string) error {
+	_, err := s.pool.Exec(ctx, `
+		UPDATE devices SET identity_class = $1, trust_level = $2, issuer_fingerprint = $3, os_version = $4, pcr_values = $5 WHERE id = $6
+	`, identityClass, trustLevel, issuerFP, osVersion, pcrValuesToJSON(pcrValues), id)
+	if err != nil {
+		return fmt.Errorf("update trust data: %w", err)
+	}
+	return nil
+}
+
+func pcrValuesToJSON(pcrValues map[string]string) []byte {
+	if pcrValues == nil {
+		return nil
+	}
+	data, _ := json.Marshal(pcrValues)
+	return data
+}
+
 func ipToString(ip net.IP) *string {
 	if ip == nil {
 		return nil
@@ -280,10 +327,11 @@ func isDuplicateKeyError(err error) bool {
 // CreateDevice inserts a device into an existing account.
 func (s *DeviceStore) CreateDevice(ctx context.Context, device *model.Device) error {
 	_, err := s.pool.Exec(ctx, `
-		INSERT INTO devices (id, account_id, slug, hostname, custom_hostname, identity_class, ek_fingerprint, ek_cert_der, ak_public_key, ip_address, status)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		INSERT INTO devices (id, account_id, slug, hostname, custom_hostname, identity_class, ek_fingerprint, ek_cert_der, ak_public_key, issuer_fingerprint, os_version, pcr_values, trust_level, ip_address, status, last_seen_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, NOW())
 	`, device.ID, device.AccountID, device.Slug, device.Hostname, device.CustomHostname,
 		device.IdentityClass, device.EKFingerprint, device.EKCertDER, device.AKPublicKey,
+		device.IssuerFingerprint, device.OSVersion, pcrValuesToJSON(device.PCRValues), device.TrustLevel,
 		ipToString(device.IPAddress), device.Status)
 	if err != nil {
 		var pgErr *pgconn.PgError
@@ -317,10 +365,11 @@ func CreateDeviceWithAccount(ctx context.Context, pool *pgxpool.Pool, account *m
 	}
 
 	_, err = tx.Exec(ctx, `
-		INSERT INTO devices (id, account_id, slug, hostname, custom_hostname, identity_class, ek_fingerprint, ek_cert_der, ak_public_key, ip_address, status)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		INSERT INTO devices (id, account_id, slug, hostname, custom_hostname, identity_class, ek_fingerprint, ek_cert_der, ak_public_key, issuer_fingerprint, os_version, pcr_values, trust_level, ip_address, status, last_seen_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, NOW())
 	`, device.ID, device.AccountID, device.Slug, device.Hostname, device.CustomHostname,
 		device.IdentityClass, device.EKFingerprint, device.EKCertDER, device.AKPublicKey,
+		device.IssuerFingerprint, device.OSVersion, pcrValuesToJSON(device.PCRValues), device.TrustLevel,
 		ipToString(device.IPAddress), device.Status)
 	if err != nil {
 		var pgErr *pgconn.PgError
@@ -365,10 +414,11 @@ func CreateDeviceWithRecoveryAccount(ctx context.Context, pool *pgxpool.Pool, ac
 	}
 
 	_, err = tx.Exec(ctx, `
-		INSERT INTO devices (id, account_id, slug, hostname, custom_hostname, identity_class, ek_fingerprint, ek_cert_der, ak_public_key, ip_address, status)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		INSERT INTO devices (id, account_id, slug, hostname, custom_hostname, identity_class, ek_fingerprint, ek_cert_der, ak_public_key, issuer_fingerprint, os_version, pcr_values, trust_level, ip_address, status, last_seen_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, NOW())
 	`, device.ID, device.AccountID, device.Slug, device.Hostname, device.CustomHostname,
 		device.IdentityClass, device.EKFingerprint, device.EKCertDER, device.AKPublicKey,
+		device.IssuerFingerprint, device.OSVersion, pcrValuesToJSON(device.PCRValues), device.TrustLevel,
 		ipToString(device.IPAddress), device.Status)
 	if err != nil {
 		var pgErr *pgconn.PgError

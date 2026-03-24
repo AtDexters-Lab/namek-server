@@ -126,7 +126,7 @@ func main() {
 	cnameResolver := dns.NewDNSCNAMEResolver(cfg.AliasDomain.DNSResolver, cfg.VerificationTimeout())
 
 	// Services
-	deviceSvc := service.NewDeviceService(stores.Device, stores.Account, stores.Audit, pool, cfg, logger)
+	deviceSvc := service.NewDeviceService(stores.Device, stores.Account, stores.Audit, stores.Census, pool, cfg, logger)
 	nexusSvc := service.NewNexusService(stores.Nexus, stores.Audit, pdns, cfg, logger)
 	tokenSvc := service.NewTokenService(stores.Device, stores.Domain, tokenIssuer, cfg, logger)
 	acmeSvc := service.NewACMEService(stores.ACME, stores.Device, pdns, cfg, logger)
@@ -134,10 +134,12 @@ func main() {
 	accountSvc := service.NewAccountService(stores.Account, stores.Device, stores.Invite, stores.Audit, cfg, logger)
 	voucherSvc := service.NewVoucherService(stores.Voucher, stores.Device, stores.Account, stores.Audit, tpmVerifier, cfg, logger)
 	recoverySvc := service.NewRecoveryService(stores.Recovery, stores.Account, stores.Device, stores.Audit, tpmVerifier, cfg, logger)
+	censusSvc := service.NewCensusService(stores.Census, stores.Device, stores.Audit, pool, cfg, logger)
 	accountSvc.SetVoucherCreator(voucherSvc)
 	deviceSvc.SetRecoveryProcessor(recoverySvc)
 
 	// Start background goroutines
+	go censusSvc.Run(ctx)
 	go nexusSvc.HealthCheckLoop(ctx)
 	go acmeSvc.CleanupLoop(ctx)
 	go domainSvc.CleanupLoop(ctx)
@@ -253,6 +255,8 @@ func main() {
 		RecoverySvc:   recoverySvc,
 		RecoveryStore: stores.Recovery,
 		AuditStore:    stores.Audit,
+		CensusStore:   stores.Census,
+		CensusSvc:     censusSvc,
 		Pool:          pool,
 		PowerDNS:      pdns,
 	})

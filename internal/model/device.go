@@ -25,9 +25,13 @@ type Device struct {
 	EKFingerprint  string       `json:"ek_fingerprint"`
 	EKCertDER      []byte       `json:"-"`
 	AKPublicKey    []byte       `json:"-"`
-	IPAddress      net.IP       `json:"ip_address,omitempty"`
-	Timezone       *string      `json:"timezone,omitempty"`
-	Status         DeviceStatus `json:"status"`
+	IssuerFingerprint *string           `json:"issuer_fingerprint,omitempty"`
+	OSVersion         *string           `json:"os_version,omitempty"`
+	PCRValues         map[string]string `json:"pcr_values,omitempty"`
+	TrustLevel        TrustLevel        `json:"trust_level"`
+	IPAddress         net.IP            `json:"ip_address,omitempty"`
+	Timezone          *string           `json:"timezone,omitempty"`
+	Status            DeviceStatus      `json:"status"`
 
 	HostnameChangesThisYear int        `json:"-"`
 	HostnameYear            int        `json:"-"`

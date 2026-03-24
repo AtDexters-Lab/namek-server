@@ -3,6 +3,9 @@ package tpm
 import (
 	"bytes"
 	"crypto"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/asn1"
@@ -14,6 +17,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/AtDexters-Lab/namek-server/internal/config"
 	"github.com/google/go-attestation/attest"
@@ -36,15 +40,18 @@ func NewVerifier(cfg config.TPMConfig, logger *slog.Logger) (Verifier, error) {
 
 	loaded := 0
 	if cfg.TrustedCACertsDir != "" {
-		loaded += v.loadCertsFromDir(cfg.TrustedCACertsDir, v.hardwareCAs, "hardware")
+		loaded += v.loadCertsFromDir(cfg.TrustedCACertsDir, v.hardwareCAs, "operator")
+	}
+	if cfg.SeedBundleDir != "" {
+		loaded += v.loadCertsFromDir(cfg.SeedBundleDir, v.hardwareCAs, "seed-bundle")
 	}
 
 	if loaded == 0 && !cfg.AllowSoftwareTPM {
-		return nil, fmt.Errorf("no TPM CA certificates loaded and allowSoftwareTPM is false: configure tpm.trustedCACertsDir or set tpm.allowSoftwareTPM")
+		logger.Warn("no TPM CA certificates loaded and allowSoftwareTPM is false: all devices will be classified as unverified_hw")
 	}
 
 	if cfg.AllowSoftwareTPM {
-		logger.Warn("allowSoftwareTPM is enabled: any EK certificate will be accepted as software without CA verification")
+		logger.Warn("allowSoftwareTPM is enabled: unverifiable EK certs will be accepted as software tier")
 	}
 	logger.Info("tpm verifier initialized", "hardwareCAs", loaded, "allowSoftwareTPM", cfg.AllowSoftwareTPM)
 	return v, nil
@@ -69,18 +76,18 @@ func trimDERTrailingData(der []byte) ([]byte, bool) {
 // parseEKCertLenient parses a DER-encoded X.509 certificate, tolerating
 // trailing bytes after the ASN.1 SEQUENCE structure.
 func (v *realVerifier) parseEKCertLenient(der []byte) (*x509.Certificate, error) {
-	trimmed, didTrim := trimDERTrailingData(der)
+	_, didTrim := trimDERTrailingData(der)
 	if didTrim {
 		v.logger.Warn("stripped trailing data from EK certificate DER",
-			"originalLen", len(der), "trimmedLen", len(trimmed))
+			"originalLen", len(der))
 	}
-	return x509.ParseCertificate(trimmed)
+	return parseEKCertClean(der)
 }
 
-func (v *realVerifier) VerifyEKCert(ekCertDER []byte) (string, crypto.PublicKey, error) {
+func (v *realVerifier) VerifyEKCert(ekCertDER []byte) (*EKVerifyResult, error) {
 	cert, err := v.parseEKCertLenient(ekCertDER)
 	if err != nil {
-		return "", nil, fmt.Errorf("parse EK cert: %w", err)
+		return nil, fmt.Errorf("parse EK cert: %w", err)
 	}
 
 	// TPM EK certs contain SAN (2.5.29.17) with DirectoryName entries for TPM
@@ -96,6 +103,16 @@ func (v *realVerifier) VerifyEKCert(ekCertDER []byte) (string, crypto.PublicKey,
 	}
 	cert.UnhandledCriticalExtensions = filtered
 
+	result := &EKVerifyResult{
+		EKPubKey:      cert.PublicKey,
+		IssuerSubject: cert.Issuer.String(),
+	}
+
+	// Compute issuer fingerprint from issuer DN DER as fallback.
+	// If we verify against hardwareCAs, we'll upgrade to SubjectPublicKeyInfo.
+	issuerDNHash := sha256.Sum256(cert.RawIssuer)
+	result.IssuerFingerprint = hex.EncodeToString(issuerDNHash[:])
+
 	// EK certs typically lack ExtKeyUsageServerAuth (or have TPM-specific OIDs),
 	// so we use ExtKeyUsageAny to avoid rejecting valid certs.
 	ekVerifyOpts := func(roots *x509.CertPool) x509.VerifyOptions {
@@ -106,16 +123,104 @@ func (v *realVerifier) VerifyEKCert(ekCertDER []byte) (string, crypto.PublicKey,
 	}
 
 	// Try hardware CA pool first
-	if _, err := cert.Verify(ekVerifyOpts(v.hardwareCAs)); err == nil {
-		return IdentityClassVerified, cert.PublicKey, nil
+	if chains, err := cert.Verify(ekVerifyOpts(v.hardwareCAs)); err == nil {
+		result.IdentityClass = IdentityClassVerified
+		// Extract issuer metadata from the verified chain
+		if len(chains) > 0 && len(chains[0]) > 1 {
+			issuer := chains[0][1]
+			spkiHash := sha256.Sum256(issuer.RawSubjectPublicKeyInfo)
+			result.IssuerFingerprint = hex.EncodeToString(spkiHash[:])
+			result.IssuerPubKeyDER = issuer.RawSubjectPublicKeyInfo
+			result.IssuerIsCA = issuer.IsCA
+			result.IssuerHasCertSign = issuer.KeyUsage&x509.KeyUsageCertSign != 0
+		}
+		return result, nil
 	}
 
 	// If software TPM is allowed, accept any EK that didn't match hardware CAs
 	if v.allowSoftwareTPM {
-		return IdentityClassSoftware, cert.PublicKey, nil
+		result.IdentityClass = IdentityClassSoftware
+		return result, nil
 	}
 
-	return "", nil, fmt.Errorf("EK cert not trusted by any hardware CA")
+	// Credential activation proves real TPM — classify as unverified hardware
+	result.IdentityClass = IdentityClassUnverifiedHW
+	return result, nil
+}
+
+// ComputeStructuralCompliance scores an EK certificate against TCG profile expectations.
+// Returns a score from 0.0 to 1.0 (5 checks, each worth 0.2).
+func ComputeStructuralCompliance(cert *x509.Certificate) float32 {
+	var score float32
+
+	// Check 1: EKU — no ServerAuth/ClientAuth; may have TPM-specific OID or no EKU
+	hasServerAuth := false
+	hasClientAuth := false
+	for _, eku := range cert.ExtKeyUsage {
+		if eku == x509.ExtKeyUsageServerAuth {
+			hasServerAuth = true
+		}
+		if eku == x509.ExtKeyUsageClientAuth {
+			hasClientAuth = true
+		}
+	}
+	if !hasServerAuth && !hasClientAuth {
+		score += 0.2
+	}
+
+	// Check 2: SAN contains TPM manufacturer info (DirectoryName with OIDs 2.23.133.2.*)
+	oidSAN := asn1.ObjectIdentifier{2, 5, 29, 17}
+	oidTPMManufacturer := asn1.ObjectIdentifier{2, 23, 133, 2}
+	for _, ext := range cert.Extensions {
+		if ext.Id.Equal(oidSAN) {
+			// Check raw SAN extension for TPM manufacturer OIDs
+			if containsOIDPrefix(ext.Value, oidTPMManufacturer) {
+				score += 0.2
+			}
+			break
+		}
+	}
+
+	// Check 3: Key type and size — RSA-2048 or ECC P-256
+	switch pub := cert.PublicKey.(type) {
+	case *rsa.PublicKey:
+		if pub.N.BitLen() == 2048 {
+			score += 0.2
+		}
+	case *ecdsa.PublicKey:
+		if pub.Curve == elliptic.P256() {
+			score += 0.2
+		}
+	}
+
+	// Check 4: Certificate validity period >= 10 years
+	validity := cert.NotAfter.Sub(cert.NotBefore)
+	if validity >= 10*365*24*time.Hour {
+		score += 0.2
+	}
+
+	// Check 5: Basic Constraints — IsCA must be false
+	if !cert.IsCA {
+		score += 0.2
+	}
+
+	return score
+}
+
+// containsOIDPrefix checks if raw ASN.1 data contains an OID with the given prefix.
+// This is a best-effort check on the raw SAN extension bytes.
+func containsOIDPrefix(raw []byte, prefix asn1.ObjectIdentifier) bool {
+	// Encode the prefix OID to its DER byte representation for searching
+	prefixDER, err := asn1.Marshal(prefix)
+	if err != nil {
+		return false
+	}
+	// The marshalled form includes tag+length, skip to the value portion
+	if len(prefixDER) < 2 {
+		return false
+	}
+	prefixBytes := prefixDER[2:] // skip tag (0x06) and length byte
+	return bytes.Contains(raw, prefixBytes)
 }
 
 const (
@@ -129,13 +234,12 @@ const (
 )
 
 // VerifyQuote verifies a TPM2 quote signed by the AK.
+// When pcrValues is non-nil, the quote's PCR digest is verified against
+// the provided values. When nil, only the signature and nonce are checked.
 //
 // Wire format for quoteB64 (after base64 decode):
 //
 //	uint32(quoteLen) [big-endian] || TPMS_ATTEST || TPMT_SIGNATURE
-//
-// PCR validation is intentionally skipped (nil PCRs) at MVP — the quote serves
-// as AK proof-of-possession only. PCR policy checking is a follow-up.
 func (v *realVerifier) VerifyQuote(akPubKeyDER []byte, nonce string, quoteB64 string, pcrValues map[int][]byte) (*QuoteResult, error) {
 	akPub, err := attest.ParseAKPublic(akPubKeyDER)
 	if err != nil {
@@ -170,13 +274,29 @@ func (v *realVerifier) VerifyQuote(akPubKeyDER []byte, nonce string, quoteB64 st
 	quoteBytes := data[4 : 4+ql]
 	sigBytes := data[4+ql:]
 
-	if err := akPub.Verify(attest.Quote{Quote: quoteBytes, Signature: sigBytes}, nil, []byte(nonce)); err != nil {
+	// Build PCR list for verification when values are provided
+	var pcrs []attest.PCR
+	if pcrValues != nil {
+		pcrs = make([]attest.PCR, 0, len(pcrValues))
+		for idx, digest := range pcrValues {
+			if len(digest) != 32 {
+				return nil, fmt.Errorf("PCR %d digest length %d, expected 32 (SHA-256)", idx, len(digest))
+			}
+			pcrs = append(pcrs, attest.PCR{
+				Index:     idx,
+				Digest:    digest,
+				DigestAlg: crypto.SHA256,
+			})
+		}
+	}
+
+	if err := akPub.Verify(attest.Quote{Quote: quoteBytes, Signature: sigBytes}, pcrs, []byte(nonce)); err != nil {
 		v.logger.Warn("quote verification failed", "error", err)
 		return nil, fmt.Errorf("verify quote: %w", err)
 	}
 
-	v.logger.Debug("quote verification succeeded")
-	return &QuoteResult{}, nil
+	v.logger.Debug("quote verification succeeded", "pcrCount", len(pcrValues))
+	return &QuoteResult{PCRValues: pcrValues}, nil
 }
 
 // MakeCredential creates an encrypted credential blob using the EK public key.
@@ -264,6 +384,17 @@ func (v *realVerifier) EKFingerprint(ekCertDER []byte) string {
 
 func (v *realVerifier) ParseEKCert(ekCertDER []byte) (*x509.Certificate, error) {
 	return v.parseEKCertLenient(ekCertDER)
+}
+
+// ParseEKCertForCompliance parses a DER-encoded EK certificate for structural compliance scoring.
+func ParseEKCertForCompliance(ekCertDER []byte) (*x509.Certificate, error) {
+	return parseEKCertClean(ekCertDER)
+}
+
+// parseEKCertClean parses a DER cert with trailing data tolerance (shared logic).
+func parseEKCertClean(der []byte) (*x509.Certificate, error) {
+	trimmed, _ := trimDERTrailingData(der)
+	return x509.ParseCertificate(trimmed)
 }
 
 func (v *realVerifier) loadCertsFromDir(dir string, pool *x509.CertPool, label string) int {

@@ -5,6 +5,7 @@ type EnrollResult struct {
 	DeviceID       string   `json:"device_id"`
 	Hostname       string   `json:"hostname"`
 	IdentityClass  string   `json:"identity_class"`
+	TrustLevel     string   `json:"trust_level"`
 	NexusEndpoints []string `json:"nexus_endpoints"`
 	Reenrolled     bool     `json:"reenrolled,omitempty"`
 }
@@ -17,6 +18,9 @@ type DeviceInfo struct {
 	AccountID              string                  `json:"account_id"`
 	Status                 string                  `json:"status"`
 	IdentityClass          string                  `json:"identity_class"`
+	TrustLevel             string                  `json:"trust_level"`
+	IssuerFingerprint      *string                 `json:"issuer_fingerprint,omitempty"`
+	OSVersion              *string                 `json:"os_version,omitempty"`
 	RecoveryStatus         string                  `json:"recovery_status"`
 	NexusEndpoints         []string                `json:"nexus_endpoints"`
 	AliasDomains           []string                `json:"alias_domains,omitempty"`

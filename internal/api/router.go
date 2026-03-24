@@ -38,6 +38,8 @@ type RouterDeps struct {
 	AuditStore    *store.AuditStore
 	DeviceStore  *store.DeviceStore
 	AccountStore *store.AccountStore
+	CensusStore  *store.CensusStore
+	CensusSvc    *service.CensusService
 	Pool         *pgxpool.Pool
 	PowerDNS    *dns.PowerDNSClient
 }
@@ -165,6 +167,21 @@ func NewRouter(deps RouterDeps) http.Handler {
 	internal.GET("/recovery/accounts/:id", recoveryH.GetAccountStatus)
 	internal.POST("/recovery/accounts/:id/override", recoveryH.OverrideAccount)
 	internal.POST("/recovery/accounts/:id/dissolve", recoveryH.DissolveAccount)
+
+	// Census/operator endpoints (no auth — protected by network-level access)
+	// Separate route group from NexusAuth; paths don't overlap with /nexus/* or /recovery/*
+	censusH := handler.NewCensusHandler(deps.CensusStore, deps.DeviceStore, deps.AuditStore, deps.CensusSvc, deps.Logger)
+	census := r.Group("/internal/v1")
+	{
+		census.GET("/census/issuers", censusH.ListIssuers)
+		census.GET("/census/issuers/:fingerprint", censusH.GetIssuer)
+		census.POST("/census/issuers/:fingerprint/flag", censusH.FlagIssuer)
+		census.POST("/census/issuers/:fingerprint/override", censusH.OverrideIssuerTier)
+		census.GET("/census/pcr", censusH.ListPCRClusters)
+		census.GET("/census/pcr/:grouping_key", censusH.GetPCRClusters)
+		census.POST("/devices/:id/trust-override", censusH.TrustOverride)
+		census.GET("/devices/:id/trust-explain", censusH.TrustExplain)
+	}
 
 	return r
 }

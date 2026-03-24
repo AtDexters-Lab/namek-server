@@ -78,15 +78,18 @@ func (h *DeviceHandler) GetMe(c *gin.Context) {
 	}
 
 	resp := gin.H{
-		"device_id":       d.ID,
-		"hostname":        d.Hostname,
-		"custom_hostname": d.CustomHostname,
-		"alias_domains":   aliasDomains,
-		"status":          d.Status,
-		"identity_class":  d.IdentityClass,
-		"account_id":      d.AccountID,
-		"recovery_status": recoveryStatus,
-		"nexus_endpoints": endpoints,
+		"device_id":          d.ID,
+		"hostname":           d.Hostname,
+		"custom_hostname":    d.CustomHostname,
+		"alias_domains":      aliasDomains,
+		"status":             d.Status,
+		"identity_class":     d.IdentityClass,
+		"trust_level":        d.TrustLevel,
+		"issuer_fingerprint": d.IssuerFingerprint,
+		"os_version":         d.OSVersion,
+		"account_id":         d.AccountID,
+		"recovery_status":    recoveryStatus,
+		"nexus_endpoints":    endpoints,
 	}
 
 	// Conditionally include voucher data (optimization: only query when device

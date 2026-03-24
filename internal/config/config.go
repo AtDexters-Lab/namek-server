@@ -28,6 +28,7 @@ type Config struct {
 	AliasDomain  AliasDomainConfig  `yaml:"aliasDomain"`
 	Recovery     RecoveryConfig     `yaml:"recovery"`
 	Account      AccountConfig      `yaml:"account"`
+	FleetTrust   FleetTrustConfig   `yaml:"fleetTrust"`
 
 	AuditRetentionDays int `yaml:"auditRetentionDays"`
 }
@@ -62,7 +63,19 @@ func (c PowerDNSConfig) Timeout() time.Duration {
 
 type TPMConfig struct {
 	TrustedCACertsDir string `yaml:"trustedCACertsDir"`
+	SeedBundleDir     string `yaml:"seedBundleDir"`
 	AllowSoftwareTPM  bool   `yaml:"allowSoftwareTPM"`
+}
+
+type FleetTrustConfig struct {
+	CensusAnalysisIntervalMinutes int     `yaml:"censusAnalysisIntervalMinutes"`
+	CAPromotionMinDevices         int     `yaml:"caPromotionMinDevices"`
+	CAPromotionMinDays            int     `yaml:"caPromotionMinDays"`
+	CAPromotionMinSubnets         int     `yaml:"caPromotionMinSubnets"`
+	CAPromotionMinCompliance      float64 `yaml:"caPromotionMinCompliance"`
+	CAEnrollmentRatePerHour       int     `yaml:"caEnrollmentRatePerHour"`
+	PCRMajorityMinPopulation      int     `yaml:"pcrMajorityMinPopulation"`
+	CensusActiveWindowDays        int     `yaml:"censusActiveWindowDays"`
 }
 
 type NexusConfig struct {
@@ -221,6 +234,31 @@ func (c *Config) applyDefaults() {
 	if c.Account.MaxInvitesPerAccount == 0 {
 		c.Account.MaxInvitesPerAccount = 5
 	}
+	// Fleet trust defaults
+	if c.FleetTrust.CensusAnalysisIntervalMinutes == 0 {
+		c.FleetTrust.CensusAnalysisIntervalMinutes = 60
+	}
+	if c.FleetTrust.CAPromotionMinDevices == 0 {
+		c.FleetTrust.CAPromotionMinDevices = 10
+	}
+	if c.FleetTrust.CAPromotionMinDays == 0 {
+		c.FleetTrust.CAPromotionMinDays = 7
+	}
+	if c.FleetTrust.CAPromotionMinSubnets == 0 {
+		c.FleetTrust.CAPromotionMinSubnets = 5
+	}
+	if c.FleetTrust.CAPromotionMinCompliance == 0 {
+		c.FleetTrust.CAPromotionMinCompliance = 0.8
+	}
+	if c.FleetTrust.CAEnrollmentRatePerHour == 0 {
+		c.FleetTrust.CAEnrollmentRatePerHour = 5
+	}
+	if c.FleetTrust.PCRMajorityMinPopulation == 0 {
+		c.FleetTrust.PCRMajorityMinPopulation = 5
+	}
+	if c.FleetTrust.CensusActiveWindowDays == 0 {
+		c.FleetTrust.CensusActiveWindowDays = 90
+	}
 	if c.AliasDomain.MaxPerAccount == 0 {
 		c.AliasDomain.MaxPerAccount = 50
 	}
@@ -358,4 +396,8 @@ func (c *Config) InviteTTL() time.Duration {
 
 func (c *Config) QuorumTimeout() time.Duration {
 	return time.Duration(c.Recovery.QuorumTimeoutDays) * 24 * time.Hour
+}
+
+func (c *Config) CensusAnalysisInterval() time.Duration {
+	return time.Duration(c.FleetTrust.CensusAnalysisIntervalMinutes) * time.Minute
 }

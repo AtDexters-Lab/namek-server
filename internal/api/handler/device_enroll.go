@@ -2,9 +2,11 @@ package handler
 
 import (
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"log/slog"
 	"net"
+	"strconv"
 
 	"github.com/gin-gonic/gin"
 
@@ -81,6 +83,8 @@ type attestRequest struct {
 	Nonce          string                `json:"nonce" binding:"required"`
 	Secret         string                `json:"secret" binding:"required"`
 	Quote          string                `json:"quote" binding:"required"`
+	OSVersion      string                `json:"os_version,omitempty"`
+	PCRValues      map[string]string     `json:"pcr_values,omitempty"`
 	RecoveryBundle *attestRecoveryBundle `json:"recovery_bundle,omitempty"`
 }
 
@@ -118,11 +122,32 @@ func (h *DeviceEnrollHandler) CompleteEnroll(c *gin.Context) {
 		endpoints = []string{}
 	}
 
+	// Parse PCR values from hex strings to raw bytes
+	var pcrValues map[int][]byte
+	if len(req.PCRValues) > 0 {
+		pcrValues = make(map[int][]byte, len(req.PCRValues))
+		for key, hexVal := range req.PCRValues {
+			idx, err := strconv.Atoi(key)
+			if err != nil || idx < 0 || idx > 23 {
+				httputil.RespondBadRequest(c, "invalid pcr_values key: must be 0-23")
+				return
+			}
+			digest, err := hex.DecodeString(hexVal)
+			if err != nil || len(digest) != 32 {
+				httputil.RespondBadRequest(c, "invalid pcr_values: each value must be 64 hex chars (32 bytes SHA-256)")
+				return
+			}
+			pcrValues[idx] = digest
+		}
+	}
+
 	attestReq := service.AttestRequest{
-		Nonce:    req.Nonce,
-		Secret:   secret,
-		QuoteB64: req.Quote,
-		ClientIP: net.ParseIP(c.ClientIP()),
+		Nonce:     req.Nonce,
+		Secret:    secret,
+		QuoteB64:  req.Quote,
+		OSVersion: req.OSVersion,
+		PCRValues: pcrValues,
+		ClientIP:  net.ParseIP(c.ClientIP()),
 	}
 
 	// Convert handler-level recovery bundle to service-level
@@ -166,6 +191,7 @@ func (h *DeviceEnrollHandler) CompleteEnroll(c *gin.Context) {
 		"device_id":       resp.DeviceID,
 		"hostname":        resp.Hostname,
 		"identity_class":  resp.IdentityClass,
+		"trust_level":     resp.TrustLevel,
 		"nexus_endpoints": resp.NexusEndpoints,
 	}
 	if resp.Reenrolled {

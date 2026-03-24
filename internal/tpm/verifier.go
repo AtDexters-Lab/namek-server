@@ -5,10 +5,22 @@ import (
 	"crypto/x509"
 )
 
+// EKVerifyResult contains the results of EK certificate verification.
+type EKVerifyResult struct {
+	IdentityClass     string          // "verified" | "unverified_hw" | "software"
+	EKPubKey          crypto.PublicKey
+	IssuerFingerprint string // SHA-256 of issuer SubjectPublicKeyInfo (or issuer DN as fallback)
+	IssuerSubject     string
+	IssuerPubKeyDER   []byte
+	IssuerIsCA        bool
+	IssuerHasCertSign bool
+}
+
 // Verifier defines the TPM verification interface.
 type Verifier interface {
-	// VerifyEKCert verifies an EK certificate and returns the identity class.
-	VerifyEKCert(ekCertDER []byte) (identityClass string, ekPubKey crypto.PublicKey, err error)
+	// VerifyEKCert verifies an EK certificate and returns the verification result
+	// including identity class and issuer metadata for census tracking.
+	VerifyEKCert(ekCertDER []byte) (*EKVerifyResult, error)
 
 	// VerifyQuote verifies a TPM quote signed by the given AK public key.
 	// When pcrValues is non-nil, the quote's PCR digest is verified against
