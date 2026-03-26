@@ -23,8 +23,10 @@ type Config struct {
 	TPM        TPMConfig      `yaml:"tpm"`
 	Nexus      NexusConfig    `yaml:"nexus"`
 	Token      TokenConfig    `yaml:"token"`
-	Enrollment EnrollmentConfig `yaml:"enrollment"`
-	Hostname     HostnameConfig     `yaml:"hostname"`
+	Enrollment      EnrollmentConfig      `yaml:"enrollment"`
+	Nonce           NonceConfig           `yaml:"nonce"`
+	DeviceRateLimit DeviceRateLimitConfig `yaml:"deviceRateLimit"`
+	Hostname        HostnameConfig        `yaml:"hostname"`
 	AliasDomain  AliasDomainConfig  `yaml:"aliasDomain"`
 	Recovery     RecoveryConfig     `yaml:"recovery"`
 	Account      AccountConfig      `yaml:"account"`
@@ -98,7 +100,25 @@ type EnrollmentConfig struct {
 	MaxPending              int `yaml:"maxPending"`
 	PendingTTLSeconds       int `yaml:"pendingTTLSeconds"`
 	RateLimitPerSecond      int `yaml:"rateLimitPerSecond"`
+	BurstPerSecond          int `yaml:"burstPerSecond"`
 	RateLimitPerIPPerSecond int `yaml:"rateLimitPerIPPerSecond"`
+	BurstPerIPPerSecond     int `yaml:"burstPerIPPerSecond"`
+}
+
+type NonceConfig struct {
+	MaxNonces               int `yaml:"maxNonces"`
+	TTLSeconds              int `yaml:"ttlSeconds"`
+	RateLimitPerSecond      int `yaml:"rateLimitPerSecond"`
+	BurstPerSecond          int `yaml:"burstPerSecond"`
+	RateLimitPerIPPerSecond int `yaml:"rateLimitPerIPPerSecond"`
+	BurstPerIPPerSecond     int `yaml:"burstPerIPPerSecond"`
+}
+
+type DeviceRateLimitConfig struct {
+	MutationPerMin int `yaml:"mutationPerMin"`
+	MutationBurst  int `yaml:"mutationBurst"`
+	ReadPerMin     int `yaml:"readPerMin"`
+	ReadBurst      int `yaml:"readBurst"`
 }
 
 type HostnameConfig struct {
@@ -160,8 +180,9 @@ func (c *Config) applyDefaults() {
 	if c.PowerDNS.DNSAddress == "" {
 		c.PowerDNS.DNSAddress = "127.0.0.1:53"
 	}
+	// Recommended: 50 for <100k devices, 100+ for larger fleets
 	if c.Database.MaxOpenConns == 0 {
-		c.Database.MaxOpenConns = 25
+		c.Database.MaxOpenConns = 50
 	}
 	if c.Database.MaxIdleConns == 0 {
 		c.Database.MaxIdleConns = 5
@@ -200,7 +221,7 @@ func (c *Config) applyDefaults() {
 		c.AuditRetentionDays = 90
 	}
 	if c.Enrollment.MaxPending == 0 {
-		c.Enrollment.MaxPending = 1000
+		c.Enrollment.MaxPending = 5000 // Set 10000-50000 for mass recovery scenarios
 	}
 	if c.Enrollment.PendingTTLSeconds == 0 {
 		c.Enrollment.PendingTTLSeconds = 300
@@ -208,8 +229,46 @@ func (c *Config) applyDefaults() {
 	if c.Enrollment.RateLimitPerSecond == 0 {
 		c.Enrollment.RateLimitPerSecond = 10
 	}
+	if c.Enrollment.BurstPerSecond == 0 {
+		c.Enrollment.BurstPerSecond = 20
+	}
 	if c.Enrollment.RateLimitPerIPPerSecond == 0 {
 		c.Enrollment.RateLimitPerIPPerSecond = 2
+	}
+	if c.Enrollment.BurstPerIPPerSecond == 0 {
+		c.Enrollment.BurstPerIPPerSecond = 5
+	}
+	// Nonce defaults
+	if c.Nonce.MaxNonces == 0 {
+		c.Nonce.MaxNonces = 500000
+	}
+	if c.Nonce.TTLSeconds == 0 {
+		c.Nonce.TTLSeconds = 60
+	}
+	if c.Nonce.RateLimitPerSecond == 0 {
+		c.Nonce.RateLimitPerSecond = 200
+	}
+	if c.Nonce.BurstPerSecond == 0 {
+		c.Nonce.BurstPerSecond = 400
+	}
+	if c.Nonce.RateLimitPerIPPerSecond == 0 {
+		c.Nonce.RateLimitPerIPPerSecond = 50
+	}
+	if c.Nonce.BurstPerIPPerSecond == 0 {
+		c.Nonce.BurstPerIPPerSecond = 100
+	}
+	// Device rate limit defaults
+	if c.DeviceRateLimit.MutationPerMin == 0 {
+		c.DeviceRateLimit.MutationPerMin = 60
+	}
+	if c.DeviceRateLimit.MutationBurst == 0 {
+		c.DeviceRateLimit.MutationBurst = 10
+	}
+	if c.DeviceRateLimit.ReadPerMin == 0 {
+		c.DeviceRateLimit.ReadPerMin = 120
+	}
+	if c.DeviceRateLimit.ReadBurst == 0 {
+		c.DeviceRateLimit.ReadBurst = 20
 	}
 	if c.Hostname.MaxChangesPerYear == 0 {
 		c.Hostname.MaxChangesPerYear = 5
@@ -338,6 +397,44 @@ func (c *Config) validate() error {
 	if c.Enrollment.RateLimitPerIPPerSecond <= 0 {
 		return fmt.Errorf("enrollment.rateLimitPerIPPerSecond must be positive")
 	}
+	if c.Enrollment.BurstPerSecond <= 0 {
+		return fmt.Errorf("enrollment.burstPerSecond must be positive")
+	}
+	if c.Enrollment.BurstPerIPPerSecond <= 0 {
+		return fmt.Errorf("enrollment.burstPerIPPerSecond must be positive")
+	}
+	// Nonce config validation
+	if c.Nonce.MaxNonces <= 0 {
+		return fmt.Errorf("nonce.maxNonces must be positive")
+	}
+	if c.Nonce.TTLSeconds <= 0 {
+		return fmt.Errorf("nonce.ttlSeconds must be positive")
+	}
+	if c.Nonce.RateLimitPerSecond <= 0 {
+		return fmt.Errorf("nonce.rateLimitPerSecond must be positive")
+	}
+	if c.Nonce.BurstPerSecond <= 0 {
+		return fmt.Errorf("nonce.burstPerSecond must be positive")
+	}
+	if c.Nonce.RateLimitPerIPPerSecond <= 0 {
+		return fmt.Errorf("nonce.rateLimitPerIPPerSecond must be positive")
+	}
+	if c.Nonce.BurstPerIPPerSecond <= 0 {
+		return fmt.Errorf("nonce.burstPerIP must be positive")
+	}
+	// Device rate limit validation
+	if c.DeviceRateLimit.MutationPerMin <= 0 {
+		return fmt.Errorf("deviceRateLimit.mutationPerMin must be positive")
+	}
+	if c.DeviceRateLimit.MutationBurst <= 0 {
+		return fmt.Errorf("deviceRateLimit.mutationBurst must be positive")
+	}
+	if c.DeviceRateLimit.ReadPerMin <= 0 {
+		return fmt.Errorf("deviceRateLimit.readPerMin must be positive")
+	}
+	if c.DeviceRateLimit.ReadBurst <= 0 {
+		return fmt.Errorf("deviceRateLimit.readBurst must be positive")
+	}
 	if c.AuditRetentionDays <= 0 {
 		return fmt.Errorf("auditRetentionDays must be positive")
 	}
@@ -400,4 +497,8 @@ func (c *Config) QuorumTimeout() time.Duration {
 
 func (c *Config) CensusAnalysisInterval() time.Duration {
 	return time.Duration(c.FleetTrust.CensusAnalysisIntervalMinutes) * time.Minute
+}
+
+func (c *Config) NonceTTL() time.Duration {
+	return time.Duration(c.Nonce.TTLSeconds) * time.Second
 }

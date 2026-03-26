@@ -105,8 +105,12 @@ func main() {
 	}
 
 	// Nonce store
-	nonceStore := auth.NewNonceStore(logger)
+	nonceStore := auth.NewNonceStore(logger, cfg.Nonce.MaxNonces, cfg.NonceTTL())
 	go nonceStore.CleanupLoop(ctx)
+
+	// Last-seen batcher (replaces per-request fire-and-forget goroutines)
+	lastSeenBatcher := store.NewLastSeenBatcher(pool, logger)
+	go lastSeenBatcher.FlushLoop(ctx, 5*time.Second)
 
 	// TPM verifier
 	tpmVerifier, err := tpm.NewVerifier(cfg.TPM, logger)
@@ -250,11 +254,12 @@ func main() {
 		DomainSvc:    domainSvc,
 		AccountSvc:   accountSvc,
 		VoucherSvc:   voucherSvc,
-		DeviceStore:   stores.Device,
-		AccountStore:  stores.Account,
-		AuditStore:    stores.Audit,
-		Pool:          pool,
-		PowerDNS:      pdns,
+		DeviceStore:     stores.Device,
+		AccountStore:    stores.Account,
+		LastSeenBatcher: lastSeenBatcher,
+		AuditStore:      stores.Audit,
+		Pool:            pool,
+		PowerDNS:        pdns,
 	})
 
 	// Autocert setup
@@ -438,6 +443,11 @@ func main() {
 			logger.Error("admin server shutdown error", "error", err)
 		}
 	}
+
+	// Final flush of last-seen batcher before pool closes
+	flushCtx, flushCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	lastSeenBatcher.Flush(flushCtx)
+	flushCancel()
 
 	logger.Info("shutdown complete")
 }

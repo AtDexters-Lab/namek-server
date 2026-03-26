@@ -34,9 +34,10 @@ type RouterDeps struct {
 	AccountSvc    *service.AccountService
 	VoucherSvc    *service.VoucherService
 	AuditStore    *store.AuditStore
-	DeviceStore  *store.DeviceStore
-	AccountStore *store.AccountStore
-	Pool         *pgxpool.Pool
+	DeviceStore      *store.DeviceStore
+	AccountStore     *store.AccountStore
+	LastSeenBatcher  *store.LastSeenBatcher
+	Pool             *pgxpool.Pool
 	PowerDNS    *dns.PowerDNSClient
 }
 
@@ -69,28 +70,53 @@ func NewRouter(deps RouterDeps) http.Handler {
 
 	v1 := r.Group("/api/v1")
 
-	// Rate-limited public endpoints
-	rateLimited := v1.Group("/")
-	rateLimited.Use(auth.RateLimit(
+	// Enrollment rate limiting (tight: protects TPM credential challenge)
+	enrollRL := v1.Group("/")
+	enrollRL.Use(auth.RateLimit(
 		deps.Config.Enrollment.RateLimitPerSecond,
+		deps.Config.Enrollment.BurstPerSecond,
 		deps.Config.Enrollment.RateLimitPerIPPerSecond,
+		deps.Config.Enrollment.BurstPerIPPerSecond,
 	))
 	{
-		rateLimited.POST("/devices/enroll", enrollH.StartEnroll)
-		rateLimited.POST("/devices/enroll/attest", enrollH.CompleteEnroll)
-		rateLimited.GET("/nonce", nonceH.GetNonce)
+		enrollRL.POST("/devices/enroll", enrollH.StartEnroll)
+		enrollRL.POST("/devices/enroll/attest", enrollH.CompleteEnroll)
 	}
 
-	// Token verification (no auth — token is the credential)
-	v1.POST("/tokens/verify", verifyH.VerifyToken)
+	// Nonce rate limiting (generous: called on every authenticated request)
+	nonceRL := v1.Group("/")
+	nonceRL.Use(auth.RateLimit(
+		deps.Config.Nonce.RateLimitPerSecond,
+		deps.Config.Nonce.BurstPerSecond,
+		deps.Config.Nonce.RateLimitPerIPPerSecond,
+		deps.Config.Nonce.BurstPerIPPerSecond,
+	))
+	{
+		nonceRL.GET("/nonce", nonceH.GetNonce)
+	}
 
-	// Device TPM-authenticated endpoints
+	// Token verification rate limiting (unauthenticated — abuse prevention only,
+	// no config exposure needed since this is a pure crypto op with fixed cost)
+	verifyRL := v1.Group("/")
+	verifyRL.Use(auth.RateLimit(100, 200, 20, 40))
+	{
+		verifyRL.POST("/tokens/verify", verifyH.VerifyToken)
+	}
+
+	// Device TPM-authenticated endpoints with per-device rate limiting
 	deviceAuth := v1.Group("/")
 	deviceAuth.Use(auth.DeviceTPMAuth(
 		deps.DeviceStore,
 		deps.NonceStore,
 		deps.TPMVerifier,
+		deps.LastSeenBatcher,
 		deps.Logger,
+	))
+	deviceAuth.Use(auth.DeviceRateLimit(
+		deps.Config.DeviceRateLimit.MutationPerMin,
+		deps.Config.DeviceRateLimit.MutationBurst,
+		deps.Config.DeviceRateLimit.ReadPerMin,
+		deps.Config.DeviceRateLimit.ReadBurst,
 	))
 	{
 		deviceAuth.GET("/devices/me", deviceH.GetMe)
@@ -108,9 +134,10 @@ func NewRouter(deps RouterDeps) http.Handler {
 		deviceAuth.POST("/vouchers/sign", voucherH.SignVoucher)
 		deviceAuth.GET("/vouchers", voucherH.ListVouchers)
 
-		// Domain management with per-device rate limiting
+		// Domain management with tighter per-device rate limiting (stacks with
+		// the parent deviceAuth limiter — a request consumes from both buckets)
 		domainRoutes := deviceAuth.Group("/domains")
-		domainRoutes.Use(auth.DeviceRateLimit(10, 30))
+		domainRoutes.Use(auth.DeviceRateLimit(10, 5, 30, 10))
 		{
 			domainRoutes.POST("", domainH.RegisterDomain)
 			domainRoutes.GET("", domainH.ListDomains)

@@ -4,12 +4,11 @@ import (
 	"context"
 	"crypto/x509"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
 	"strings"
-	"sync"
-	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -17,6 +16,7 @@ import (
 	"github.com/AtDexters-Lab/namek-server/internal/config"
 	"github.com/AtDexters-Lab/namek-server/internal/httputil"
 	"github.com/AtDexters-Lab/namek-server/internal/model"
+	"github.com/AtDexters-Lab/namek-server/internal/ratelimit"
 	"github.com/AtDexters-Lab/namek-server/internal/store"
 	"github.com/AtDexters-Lab/namek-server/internal/tpm"
 )
@@ -39,7 +39,8 @@ func RequestIDMiddleware() gin.HandlerFunc {
 }
 
 // DeviceTPMAuth validates per-request TPM attestation.
-func DeviceTPMAuth(deviceStore *store.DeviceStore, nonceStore *NonceStore, verifier tpm.Verifier, logger *slog.Logger) gin.HandlerFunc {
+// If lastSeenBatcher is non-nil, last-seen updates are batched instead of fire-and-forget.
+func DeviceTPMAuth(deviceStore *store.DeviceStore, nonceStore *NonceStore, verifier tpm.Verifier, lastSeenBatcher *store.LastSeenBatcher, logger *slog.Logger) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		deviceIDStr := c.GetHeader("X-Device-ID")
 		nonce := c.GetHeader("X-Nonce")
@@ -96,9 +97,13 @@ func DeviceTPMAuth(deviceStore *store.DeviceStore, nonceStore *NonceStore, verif
 			return
 		}
 
-		// Update last seen (best effort, detached context to survive request completion)
+		// Update last seen (batched for efficiency, or fire-and-forget as fallback)
 		clientIP := net.ParseIP(c.ClientIP())
-		go deviceStore.UpdateLastSeen(context.WithoutCancel(c.Request.Context()), deviceID, clientIP)
+		if lastSeenBatcher != nil {
+			lastSeenBatcher.Record(deviceID, clientIP)
+		} else {
+			go deviceStore.UpdateLastSeen(context.WithoutCancel(c.Request.Context()), deviceID, clientIP)
+		}
 
 		c.Set(ContextKeyDeviceID, deviceID)
 		c.Set(ContextKeyDevice, device)
@@ -184,35 +189,15 @@ func NexusAuth(cfg *config.Config, clientCAs *x509.CertPool, logger *slog.Logger
 	}
 }
 
-// DeviceRateLimit implements per-device rate limiting with separate limits for mutations and reads.
-func DeviceRateLimit(mutationPerMin, readPerMin int) gin.HandlerFunc {
-	const staleAfter = 5 * time.Minute
+// DeviceRateLimit implements per-device rate limiting with separate limits for
+// mutations (POST, DELETE) and reads (GET, PATCH, etc.). PATCH is intentionally
+// classified as a read — it is idempotent and infrequent (hostname changes).
+func DeviceRateLimit(mutPerMin, mutBurst, readPerMin, readBurst int) gin.HandlerFunc {
+	mutBuckets := ratelimit.NewBucketMap[uuid.UUID](10000)
+	readBuckets := ratelimit.NewBucketMap[uuid.UUID](10000)
 
-	type bucket struct {
-		tokens    float64
-		lastCheck time.Time
-	}
-
-	type deviceBuckets struct {
-		mutation *bucket
-		read     *bucket
-	}
-
-	var mu sync.Mutex
-	devices := make(map[uuid.UUID]*deviceBuckets)
-	lastCleanup := time.Now()
-
-	refill := func(b *bucket, ratePerMin int) {
-		now := time.Now()
-		elapsed := now.Sub(b.lastCheck).Seconds()
-		rate := float64(ratePerMin) / 60.0
-		b.tokens += elapsed * rate
-		max := float64(ratePerMin)
-		if b.tokens > max {
-			b.tokens = max
-		}
-		b.lastCheck = now
-	}
+	mutRate := float64(mutPerMin) / 60.0
+	readRate := float64(readPerMin) / 60.0
 
 	return func(c *gin.Context) {
 		deviceIDVal, exists := c.Get(ContextKeyDeviceID)
@@ -222,128 +207,49 @@ func DeviceRateLimit(mutationPerMin, readPerMin int) gin.HandlerFunc {
 		}
 		deviceID := deviceIDVal.(uuid.UUID)
 
-		mu.Lock()
-
-		// Periodic cleanup
-		if time.Since(lastCleanup) > time.Minute {
-			now := time.Now()
-			for id, db := range devices {
-				latest := db.mutation.lastCheck
-				if db.read.lastCheck.After(latest) {
-					latest = db.read.lastCheck
-				}
-				if now.Sub(latest) > staleAfter {
-					delete(devices, id)
-				}
-			}
-			lastCleanup = now
-		}
-
-		db, ok := devices[deviceID]
-		if !ok {
-			db = &deviceBuckets{
-				mutation: &bucket{tokens: float64(mutationPerMin), lastCheck: time.Now()},
-				read:     &bucket{tokens: float64(readPerMin), lastCheck: time.Now()},
-			}
-			devices[deviceID] = db
-		}
-
 		isMutation := c.Request.Method == "POST" || c.Request.Method == "DELETE"
 
-		var b *bucket
-		var rate int
+		var b *ratelimit.Bucket
 		if isMutation {
-			b = db.mutation
-			rate = mutationPerMin
+			b = mutBuckets.GetOrCreate(deviceID, mutRate, float64(mutBurst))
 		} else {
-			b = db.read
-			rate = readPerMin
+			b = readBuckets.GetOrCreate(deviceID, readRate, float64(readBurst))
 		}
 
-		refill(b, rate)
-		if b.tokens < 1 {
-			mu.Unlock()
-			c.Header("Retry-After", "1")
+		if !b.TryConsume() {
+			c.Header("Retry-After", fmt.Sprintf("%d", b.RetryAfterSecs()))
 			httputil.RespondError(c, http.StatusTooManyRequests, "rate limit exceeded")
 			c.Abort()
 			return
 		}
-
-		b.tokens--
-		mu.Unlock()
 
 		c.Next()
 	}
 }
 
-// RateLimit implements a simple token bucket rate limiter with periodic cleanup.
-func RateLimit(globalRPS, perIPRPS int) gin.HandlerFunc {
-	const staleAfter = 5 * time.Minute
-
-	type bucket struct {
-		tokens    float64
-		lastCheck time.Time
-	}
-
-	var mu sync.Mutex
-	ipBuckets := make(map[string]*bucket)
-	globalBucket := &bucket{tokens: float64(globalRPS), lastCheck: time.Now()}
-	lastCleanup := time.Now()
-
-	refill := func(b *bucket, rate int) {
-		now := time.Now()
-		elapsed := now.Sub(b.lastCheck).Seconds()
-		b.tokens += elapsed * float64(rate)
-		if b.tokens > float64(rate) {
-			b.tokens = float64(rate)
-		}
-		b.lastCheck = now
-	}
+// RateLimit implements global + per-IP token bucket rate limiting.
+func RateLimit(globalRPS, globalBurst, perIPRPS, perIPBurst int) gin.HandlerFunc {
+	globalBucket := ratelimit.NewBucket(float64(globalRPS), float64(globalBurst))
+	ipBuckets := ratelimit.NewBucketMap[string](10000)
 
 	return func(c *gin.Context) {
-		mu.Lock()
-
-		// Periodic cleanup of stale IP buckets
-		if time.Since(lastCleanup) > time.Minute {
-			now := time.Now()
-			for ip, b := range ipBuckets {
-				if now.Sub(b.lastCheck) > staleAfter {
-					delete(ipBuckets, ip)
-				}
-			}
-			lastCleanup = now
+		// Per-IP rate limit first (avoids wasting a global token on per-IP rejection)
+		ip := c.ClientIP()
+		ipb := ipBuckets.GetOrCreate(ip, float64(perIPRPS), float64(perIPBurst))
+		if !ipb.TryConsume() {
+			c.Header("Retry-After", fmt.Sprintf("%d", ipb.RetryAfterSecs()))
+			httputil.RespondError(c, http.StatusTooManyRequests, "rate limit exceeded")
+			c.Abort()
+			return
 		}
 
 		// Global rate limit
-		refill(globalBucket, globalRPS)
-		if globalBucket.tokens < 1 {
-			mu.Unlock()
-			c.Header("Retry-After", "1")
+		if !globalBucket.TryConsume() {
+			c.Header("Retry-After", fmt.Sprintf("%d", globalBucket.RetryAfterSecs()))
 			httputil.RespondError(c, http.StatusTooManyRequests, "rate limit exceeded")
 			c.Abort()
 			return
 		}
-
-		// Per-IP rate limit
-		ip := c.ClientIP()
-		ipb, ok := ipBuckets[ip]
-		if !ok {
-			ipb = &bucket{tokens: float64(perIPRPS), lastCheck: time.Now()}
-			ipBuckets[ip] = ipb
-		}
-		refill(ipb, perIPRPS)
-
-		if ipb.tokens < 1 {
-			mu.Unlock()
-			c.Header("Retry-After", "1")
-			httputil.RespondError(c, http.StatusTooManyRequests, "rate limit exceeded")
-			c.Abort()
-			return
-		}
-
-		globalBucket.tokens--
-		ipb.tokens--
-		mu.Unlock()
 
 		c.Next()
 	}

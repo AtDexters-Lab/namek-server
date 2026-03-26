@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -230,6 +232,126 @@ func (s *DeviceStore) UpdateLastSeen(ctx context.Context, id uuid.UUID, ip net.I
 		return fmt.Errorf("update last seen: %w", err)
 	}
 	return nil
+}
+
+// LastSeenBatcher coalesces per-request UpdateLastSeen writes into periodic batch UPDATEs.
+// This replaces unbounded fire-and-forget goroutines with a single flush goroutine.
+type LastSeenBatcher struct {
+	mu      sync.Mutex
+	pending map[uuid.UUID]lastSeenEntry
+	pool    *pgxpool.Pool
+	logger  *slog.Logger
+}
+
+type lastSeenEntry struct {
+	ip        net.IP
+	timestamp time.Time
+}
+
+type flushEntry struct {
+	id uuid.UUID
+	e  lastSeenEntry
+}
+
+func NewLastSeenBatcher(pool *pgxpool.Pool, logger *slog.Logger) *LastSeenBatcher {
+	return &LastSeenBatcher{
+		pending: make(map[uuid.UUID]lastSeenEntry),
+		pool:    pool,
+		logger:  logger,
+	}
+}
+
+// Record stores a last-seen update to be flushed later. Non-blocking, no DB call.
+func (b *LastSeenBatcher) Record(deviceID uuid.UUID, ip net.IP) {
+	b.mu.Lock()
+	b.pending[deviceID] = lastSeenEntry{ip: ip, timestamp: time.Now()}
+	b.mu.Unlock()
+}
+
+// FlushLoop periodically flushes pending updates. Sequential: waits for each flush
+// to complete before starting the next. Stops when ctx is cancelled.
+func (b *LastSeenBatcher) FlushLoop(ctx context.Context, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			b.Flush(ctx)
+		}
+	}
+}
+
+// Flush writes all pending updates to the database. Safe to call from shutdown code.
+func (b *LastSeenBatcher) Flush(ctx context.Context) {
+	b.mu.Lock()
+	if len(b.pending) == 0 {
+		b.mu.Unlock()
+		return
+	}
+	// Swap out the pending map
+	batch := b.pending
+	b.pending = make(map[uuid.UUID]lastSeenEntry, len(batch))
+	b.mu.Unlock()
+
+	start := time.Now()
+	batchSize := len(batch)
+
+	// Chunk into batches of 5000 to avoid oversized queries
+	const chunkSize = 5000
+	entries := make([]flushEntry, 0, batchSize)
+	for id, e := range batch {
+		entries = append(entries, flushEntry{id, e})
+	}
+
+	for i := 0; i < len(entries); i += chunkSize {
+		end := i + chunkSize
+		if end > len(entries) {
+			end = len(entries)
+		}
+		chunk := entries[i:end]
+
+		if err := b.flushChunk(ctx, chunk); err != nil {
+			b.logger.Warn("last_seen batch flush failed",
+				"error", err,
+				"batch_size", len(chunk),
+				"dropped", true,
+			)
+			// Discard on failure — last_seen_at is advisory data
+			continue
+		}
+	}
+
+	b.logger.Debug("last_seen batch flush",
+		"batch_size", batchSize,
+		"duration_ms", time.Since(start).Milliseconds(),
+	)
+}
+
+func (b *LastSeenBatcher) flushChunk(ctx context.Context, chunk []flushEntry) error {
+	if len(chunk) == 0 {
+		return nil
+	}
+
+	// Build batch UPDATE using VALUES clause
+	var sb strings.Builder
+	args := make([]any, 0, len(chunk)*3)
+	sb.WriteString("UPDATE devices AS d SET last_seen_at = v.ts::timestamptz, ip_address = v.ip FROM (VALUES ")
+
+	for i, entry := range chunk {
+		if i > 0 {
+			sb.WriteString(", ")
+		}
+		argBase := i * 3
+		fmt.Fprintf(&sb, "($%d::uuid, $%d::timestamptz, $%d::text)", argBase+1, argBase+2, argBase+3)
+		args = append(args, entry.id, entry.e.timestamp, ipToString(entry.e.ip))
+	}
+	sb.WriteString(") AS v(id, ts, ip) WHERE d.id = v.id")
+
+	_, err := b.pool.Exec(ctx, sb.String(), args...)
+	return err
 }
 
 func (s *DeviceStore) UpdateStatus(ctx context.Context, id uuid.UUID, status model.DeviceStatus) error {

@@ -6,7 +6,7 @@ adminAddress: ":8056"  # omit to disable PowerDNS admin UI
 
 database:
   url: "postgres://namek:password@localhost:5432/namek?sslmode=disable"
-  maxOpenConns: 25
+  maxOpenConns: 50   # recommended: 50 for <100k devices, 100+ for larger fleets
   maxIdleConns: 5
 
 dns:
@@ -46,8 +46,27 @@ token:
 
 auditRetentionDays: 90
 
+# Enrollment rate limiting (separate from nonce)
 enrollment:
-  maxPending: 1000
+  maxPending: 5000           # set 10000-50000 for mass recovery scenarios
   pendingTTLSeconds: 300
-  rateLimitPerSecond: 10
-  rateLimitPerIPPerSecond: 2
+  rateLimitPerSecond: 10     # global RPS for enrollment endpoints
+  burstPerSecond: 20         # global burst (2x rate)
+  rateLimitPerIPPerSecond: 2 # per-IP sustained rate
+  burstPerIPPerSecond: 5     # per-IP burst (~2.5x rate)
+
+# Nonce endpoint (called on every authenticated request)
+nonce:
+  maxNonces: 500000              # capacity ~40MB at cap; must accommodate rate * TTL
+  ttlSeconds: 60                 # nonce lifetime
+  rateLimitPerSecond: 200        # global RPS (separate from enrollment)
+  burstPerSecond: 400            # global burst (2x rate)
+  rateLimitPerIPPerSecond: 50    # per-IP sustained rate
+  burstPerIPPerSecond: 100       # per-IP burst (2x rate)
+
+# Per-device rate limiting (applied to all authenticated endpoints)
+deviceRateLimit:
+  mutationPerMin: 60   # POST/DELETE operations (1/sec sustained)
+  mutationBurst: 10
+  readPerMin: 120      # GET/PATCH operations (2/sec sustained)
+  readBurst: 20

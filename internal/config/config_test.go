@@ -38,8 +38,8 @@ nexus:
 	if cfg.Token.TTLSeconds != 30 {
 		t.Errorf("token.ttlSeconds default = %d, want 30", cfg.Token.TTLSeconds)
 	}
-	if cfg.Enrollment.MaxPending != 1000 {
-		t.Errorf("enrollment.maxPending default = %d, want 1000", cfg.Enrollment.MaxPending)
+	if cfg.Enrollment.MaxPending != 5000 {
+		t.Errorf("enrollment.maxPending default = %d, want 5000", cfg.Enrollment.MaxPending)
 	}
 	if len(cfg.DNS.Nameservers) != 1 || cfg.DNS.Nameservers[0] != "namek.test.com" {
 		t.Errorf("dns.nameservers default = %v, want [namek.test.com]", cfg.DNS.Nameservers)

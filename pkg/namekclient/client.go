@@ -22,6 +22,8 @@ type Client struct {
 	httpClient *http.Client
 	tpm        tpmdevice.Device
 	deviceID   string
+	retry      *retryConfig
+	limiter    *clientLimiter // optional; nil means no client-side rate limiting
 }
 
 // Option configures a Client.
@@ -58,12 +60,42 @@ func WithDeviceID(id string) Option {
 	}
 }
 
+// WithRetry configures automatic retry with exponential backoff for retryable errors
+// (429 Too Many Requests, 503 Service Unavailable). Respects Retry-After headers.
+func WithRetry(maxAttempts int, baseDelay, maxDelay time.Duration) Option {
+	return func(c *Client) {
+		c.retry = &retryConfig{
+			maxAttempts: maxAttempts,
+			baseDelay:   baseDelay,
+			maxDelay:    maxDelay,
+			jitterFrac:  0.25,
+		}
+	}
+}
+
+// WithNoRetry disables automatic retry (useful for testing).
+func WithNoRetry() Option {
+	return func(c *Client) {
+		c.retry = nil
+	}
+}
+
+// WithRateLimit enables client-side rate limiting to prevent overwhelming the server.
+// requestsPerSecond is the sustained rate, burst is the maximum concurrent burst.
+func WithRateLimit(requestsPerSecond float64, burst int) Option {
+	return func(c *Client) {
+		c.limiter = newClientLimiter(requestsPerSecond, burst)
+	}
+}
+
 // New creates a namekclient that uses the given TPM device for attestation.
 func New(baseURL string, tpm tpmdevice.Device, opts ...Option) *Client {
+	rc := defaultRetry
 	c := &Client{
 		baseURL:    baseURL,
 		httpClient: &http.Client{Timeout: 30 * time.Second},
 		tpm:        tpm,
+		retry:      &rc,
 	}
 	for _, o := range opts {
 		o(c)
@@ -523,60 +555,96 @@ func (c *Client) VerifyToken(ctx context.Context, token string) (*VerifyResult, 
 }
 
 // doAuthenticated performs an authenticated request with nonce + TPM quote.
+// The entire nonce-fetch + quote + request cycle is retried on retryable errors,
+// since the nonce is consumed server-side.
 func (c *Client) doAuthenticated(ctx context.Context, method, path string, body any) (*http.Response, error) {
 	if c.deviceID == "" {
 		return nil, fmt.Errorf("not enrolled: call Enroll first")
 	}
 
-	// 1. Fetch nonce
-	var nonceResp struct {
-		Nonce string `json:"nonce"`
-	}
-	if err := c.doJSON(ctx, http.MethodGet, "/api/v1/nonce", nil, &nonceResp); err != nil {
-		return nil, fmt.Errorf("get nonce: %w", err)
-	}
-
-	// 2. Generate TPM quote over nonce
-	quoteB64, err := c.tpm.Quote(nonceResp.Nonce)
-	if err != nil {
-		return nil, fmt.Errorf("generate quote: %w", err)
-	}
-
-	// 3. Build request
-	var bodyReader io.Reader
+	// Marshal body once outside the retry loop
+	var bodyData []byte
 	if body != nil {
-		data, err := json.Marshal(body)
+		var err error
+		bodyData, err = json.Marshal(body)
 		if err != nil {
 			return nil, fmt.Errorf("marshal body: %w", err)
 		}
-		bodyReader = bytes.NewReader(data)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, bodyReader)
-	if err != nil {
-		return nil, err
-	}
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	req.Header.Set("X-Device-ID", c.deviceID)
-	req.Header.Set("X-Nonce", nonceResp.Nonce)
-	req.Header.Set("X-TPM-Quote", quoteB64)
+	var resp *http.Response
+	err := doWithRetry(ctx, c.retry, method, func() error {
+		// Client-side rate limiting (nonce fetch goes through doJSONNoRetry
+		// which also checks the limiter, but the authenticated request itself
+		// must also be accounted for)
+		if c.limiter != nil {
+			if err := c.limiter.Wait(ctx); err != nil {
+				return err
+			}
+		}
 
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
+		// 1. Fetch nonce
+		var nonceResp struct {
+			Nonce string `json:"nonce"`
+		}
+		if err := c.doJSONNoRetry(ctx, http.MethodGet, "/api/v1/nonce", nil, &nonceResp); err != nil {
+			return fmt.Errorf("get nonce: %w", err)
+		}
 
-	if resp.StatusCode >= 400 {
-		defer resp.Body.Close()
-		return nil, readError(resp)
-	}
-	return resp, nil
+		// 2. Generate TPM quote over nonce
+		quoteB64, err := c.tpm.Quote(nonceResp.Nonce)
+		if err != nil {
+			return fmt.Errorf("generate quote: %w", err)
+		}
+
+		// 3. Build request
+		var bodyReader io.Reader
+		if bodyData != nil {
+			bodyReader = bytes.NewReader(bodyData)
+		}
+
+		req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, bodyReader)
+		if err != nil {
+			return err
+		}
+		if bodyData != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		req.Header.Set("X-Device-ID", c.deviceID)
+		req.Header.Set("X-Nonce", nonceResp.Nonce)
+		req.Header.Set("X-TPM-Quote", quoteB64)
+
+		r, err := c.httpClient.Do(req)
+		if err != nil {
+			return err
+		}
+
+		if r.StatusCode >= 400 {
+			defer r.Body.Close()
+			return parseError(r)
+		}
+		resp = r
+		return nil
+	})
+	return resp, err
 }
 
-// doJSON performs a simple JSON request/response cycle.
+// doJSON performs a simple JSON request/response cycle with retry.
 func (c *Client) doJSON(ctx context.Context, method, path string, body any, out any) error {
+	return doWithRetry(ctx, c.retry, method, func() error {
+		return c.doJSONNoRetry(ctx, method, path, body, out)
+	})
+}
+
+// doJSONNoRetry performs a single JSON request/response cycle without retry.
+// Used internally by doAuthenticated which handles retry at a higher level.
+func (c *Client) doJSONNoRetry(ctx context.Context, method, path string, body any, out any) error {
+	if c.limiter != nil {
+		if err := c.limiter.Wait(ctx); err != nil {
+			return err
+		}
+	}
+
 	var bodyReader io.Reader
 	if body != nil {
 		data, err := json.Marshal(body)
@@ -601,7 +669,7 @@ func (c *Client) doJSON(ctx context.Context, method, path string, body any, out 
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 400 {
-		return readError(resp)
+		return parseError(resp)
 	}
 
 	if out != nil {
@@ -612,12 +680,7 @@ func (c *Client) doJSON(ctx context.Context, method, path string, body any, out 
 
 func decodeResponse(resp *http.Response, out any) error {
 	if resp.StatusCode >= 400 {
-		return readError(resp)
+		return parseError(resp)
 	}
 	return json.NewDecoder(io.LimitReader(resp.Body, maxResponseSize)).Decode(out)
-}
-
-func readError(resp *http.Response) error {
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-	return fmt.Errorf("server error %d: %s", resp.StatusCode, string(body))
 }
