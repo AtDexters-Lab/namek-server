@@ -8,7 +8,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"github.com/AtDexters-Lab/namek-server/pkg/tpmdevice"
@@ -18,12 +20,14 @@ const maxResponseSize = 1 << 20 // 1 MB
 
 // Client is an HTTP client for the namek server API.
 type Client struct {
-	baseURL    string
-	httpClient *http.Client
-	tpm        tpmdevice.Device
-	deviceID   string
-	retry      *retryConfig
-	limiter    *clientLimiter // optional; nil means no client-side rate limiting
+	baseURL          string
+	httpClient       *http.Client
+	tpm              tpmdevice.Device
+	deviceID         string
+	retry            *retryConfig
+	limiter          *clientLimiter    // optional; nil means no client-side rate limiting
+	reconnectJitter  time.Duration     // max jitter before first request after failure; 0 = disabled
+	degraded         atomic.Bool       // true after a request fails; cleared after jitter is applied
 }
 
 // Option configures a Client.
@@ -88,6 +92,17 @@ func WithRateLimit(requestsPerSecond float64, burst int) Option {
 	}
 }
 
+// WithReconnectJitter sets the maximum random delay applied before the first
+// request after a failure. This spreads the thundering herd when many clients
+// recover simultaneously (e.g., after a server outage). Default: disabled.
+func WithReconnectJitter(maxDelay time.Duration) Option {
+	return func(c *Client) {
+		if maxDelay > 0 {
+			c.reconnectJitter = maxDelay
+		}
+	}
+}
+
 // New creates a namekclient that uses the given TPM device for attestation.
 func New(baseURL string, tpm tpmdevice.Device, opts ...Option) *Client {
 	rc := defaultRetry
@@ -108,7 +123,8 @@ func (c *Client) DeviceID() string {
 	return c.deviceID
 }
 
-// Health calls GET /health.
+// Health calls GET /health. Bypasses jitter and degraded tracking intentionally —
+// health probes should not be delayed, and are typically used as readiness gates.
 func (c *Client) Health(ctx context.Context) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/health", nil)
 	if err != nil {
@@ -125,7 +141,7 @@ func (c *Client) Health(ctx context.Context) error {
 	return nil
 }
 
-// Ready calls GET /ready.
+// Ready calls GET /ready. Bypasses jitter and degraded tracking (same rationale as Health).
 func (c *Client) Ready(ctx context.Context) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/ready", nil)
 	if err != nil {
@@ -544,14 +560,40 @@ func (c *Client) GetVouchers(ctx context.Context) ([]VoucherArtifact, error) {
 	return result.Vouchers, nil
 }
 
-// VerifyToken calls POST /api/v1/tokens/verify (no auth).
+// VerifyToken calls POST /internal/v1/tokens/verify (Nexus mTLS-authenticated).
 func (c *Client) VerifyToken(ctx context.Context, token string) (*VerifyResult, error) {
 	body := map[string]string{"token": token}
 	var result VerifyResult
-	if err := c.doJSON(ctx, http.MethodPost, "/api/v1/tokens/verify", body, &result); err != nil {
+	if err := c.doJSON(ctx, http.MethodPost, "/internal/v1/tokens/verify", body, &result); err != nil {
 		return nil, err
 	}
 	return &result, nil
+}
+
+// applyReconnectJitter sleeps for a random duration if the client is recovering
+// from a degraded state. Returns ctx.Err() if the context is cancelled during the wait.
+func (c *Client) applyReconnectJitter(ctx context.Context) error {
+	if c.reconnectJitter <= 0 || !c.degraded.CompareAndSwap(true, false) {
+		return nil
+	}
+	jitter := time.Duration(rand.Int64N(int64(c.reconnectJitter)))
+	timer := time.NewTimer(jitter)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		// Restore degraded state so the next attempt re-applies jitter
+		c.degraded.Store(true)
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+// markDegraded sets the client to degraded state after a failed request.
+func (c *Client) markDegraded() {
+	if c.reconnectJitter > 0 {
+		c.degraded.Store(true)
+	}
 }
 
 // doAuthenticated performs an authenticated request with nonce + TPM quote.
@@ -570,6 +612,10 @@ func (c *Client) doAuthenticated(ctx context.Context, method, path string, body 
 		if err != nil {
 			return nil, fmt.Errorf("marshal body: %w", err)
 		}
+	}
+
+	if err := c.applyReconnectJitter(ctx); err != nil {
+		return nil, err
 	}
 
 	var resp *http.Response
@@ -626,14 +672,24 @@ func (c *Client) doAuthenticated(ctx context.Context, method, path string, body 
 		resp = r
 		return nil
 	})
+	if err != nil {
+		c.markDegraded()
+	}
 	return resp, err
 }
 
 // doJSON performs a simple JSON request/response cycle with retry.
 func (c *Client) doJSON(ctx context.Context, method, path string, body any, out any) error {
-	return doWithRetry(ctx, c.retry, method, func() error {
+	if err := c.applyReconnectJitter(ctx); err != nil {
+		return err
+	}
+	err := doWithRetry(ctx, c.retry, method, func() error {
 		return c.doJSONNoRetry(ctx, method, path, body, out)
 	})
+	if err != nil {
+		c.markDegraded()
+	}
+	return err
 }
 
 // doJSONNoRetry performs a single JSON request/response cycle without retry.

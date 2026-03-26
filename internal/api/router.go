@@ -95,14 +95,6 @@ func NewRouter(deps RouterDeps) http.Handler {
 		nonceRL.GET("/nonce", nonceH.GetNonce)
 	}
 
-	// Token verification rate limiting (unauthenticated — abuse prevention only,
-	// no config exposure needed since this is a pure crypto op with fixed cost)
-	verifyRL := v1.Group("/")
-	verifyRL.Use(auth.RateLimit(100, 200, 20, 40))
-	{
-		verifyRL.POST("/tokens/verify", verifyH.VerifyToken)
-	}
-
 	// Device TPM-authenticated endpoints with per-device rate limiting
 	deviceAuth := v1.Group("/")
 	deviceAuth.Use(auth.DeviceTPMAuth(
@@ -182,6 +174,7 @@ func NewRouter(deps RouterDeps) http.Handler {
 	internal.Use(auth.NexusAuth(deps.Config, clientCAs, deps.Logger))
 	{
 		internal.POST("/nexus/register", nexusH.Register)
+		internal.POST("/tokens/verify", verifyH.VerifyToken)
 	}
 
 	// Operator endpoints (census, recovery, trust) are on the admin listener,

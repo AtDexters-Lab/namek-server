@@ -13,7 +13,7 @@ Spec for integrating a Nexus relay with namek-server for token-verified device t
 1. **Registration:** Nexus registers with Namek via mTLS (`POST /internal/v1/nexus/register`), sending periodic heartbeats at the server-specified interval.
 2. **DNS orchestration:** Namek resolves the Nexus hostname to IPs and populates `relay.baseDomain` with A (IPv4) and AAAA (IPv6) records. A wildcard CNAME (`*.baseDomain → relay.baseDomain`) routes all device traffic through active relays.
 3. **Token issuance:** Devices request JWTs from Namek (TPM-authenticated) and present them to Nexus on WebSocket connect.
-4. **Token verification:** Nexus verifies device JWTs by calling Namek's remote verify endpoint (`POST /api/v1/tokens/verify`).
+4. **Token verification:** Nexus verifies device JWTs by calling Namek's remote verify endpoint (`POST /internal/v1/tokens/verify`, mTLS-authenticated).
 
 ### Architecture
 
@@ -35,7 +35,7 @@ Spec for integrating a Nexus relay with namek-server for token-verified device t
 +----------+                     +-----------+
 |  Nexus   |-------------------->|   namek   |
 |  relay   |   token verify      +-----------+
-+----------+  /api/v1/tokens/verify
++----------+  /internal/v1/tokens/verify (mTLS)
 ```
 
 ## 2. Registration & Heartbeat Protocol
@@ -104,7 +104,7 @@ Nexus must implement a registration client that:
 
 ### Endpoint
 
-`POST /api/v1/tokens/verify` (no authentication required)
+`POST /internal/v1/tokens/verify` (Nexus mTLS-authenticated — same credentials as `/internal/v1/nexus/register`)
 
 ### Request
 
@@ -141,9 +141,11 @@ Nexus must implement a registration client that:
 ### Nexus configuration
 
 ```yaml
-remoteVerifierURL: "https://namek.example.com/api/v1/tokens/verify"
+remoteVerifierURL: "https://namek.example.com/internal/v1/tokens/verify"
 remoteVerifierTimeoutSeconds: 5
 ```
+
+**mTLS required.** The verify endpoint is on the internal listener, authenticated with the same mTLS credentials used for `/internal/v1/nexus/register`. Nexus must present its client certificate.
 
 **`backendsJWTSecret` must be UNSET.** Nexus's validator falls back to local HMAC verification if the remote verifier returns a 5xx or network error. With Namek's ephemeral secret, local HMAC will always fail (different secret), silently masking remote verifier issues. Leave `backendsJWTSecret` empty so remote failures surface immediately.
 
@@ -318,7 +320,8 @@ When a device re-enrolls (same TPM, new AK), Namek updates the AK but preserves 
 
 ```yaml
 # Token verification — MUST use remote verifier (Namek's signing secret is ephemeral)
-remoteVerifierURL: "https://namek.example.com/api/v1/tokens/verify"
+# mTLS required: same client cert as nexus/register
+remoteVerifierURL: "https://namek.example.com/internal/v1/tokens/verify"
 remoteVerifierTimeoutSeconds: 5
 # Do NOT set backendsJWTSecret — incompatible with Namek's ephemeral secret
 

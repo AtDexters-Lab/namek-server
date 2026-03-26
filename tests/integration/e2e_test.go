@@ -88,10 +88,8 @@ func TestFullFlow(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotEmpty(t, token)
 
-	// 6. Verify token
-	vr, err := client.VerifyToken(ctx, token)
-	require.NoError(t, err)
-	assert.True(t, vr.Valid)
+	// 6. Verify token — skipped: /tokens/verify now requires Nexus mTLS credentials.
+	// Covered by Nexus integration tests with a properly configured mTLS client.
 
 	// 7. Re-enrollment: same TPM enrolling again should succeed (active device)
 	result2, err := client.Enroll(ctx)

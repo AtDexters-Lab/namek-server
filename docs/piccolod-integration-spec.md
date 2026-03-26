@@ -58,7 +58,7 @@ This means **zero per-device DNS operations** for routing. When a device enrolls
 
 1. Device gets a JWT from namek via `POST /api/v1/tokens/nexus` (TPM-authenticated)
 2. Device presents JWT to Nexus relay during WebSocket connection
-3. Nexus verifies JWT via `POST /api/v1/tokens/verify` (no auth required)
+3. Nexus verifies JWT via `POST /internal/v1/tokens/verify` (Nexus mTLS-authenticated)
 
 ## 3. Integration Prerequisites
 
@@ -632,7 +632,7 @@ Issue a Nexus JWT.
 | 401 | TPM auth failed |
 | 500 | Token signing failed |
 
-#### POST /api/v1/tokens/verify (no auth)
+#### POST /internal/v1/tokens/verify (Nexus mTLS)
 
 Verify a Nexus JWT. Called by Nexus relays.
 

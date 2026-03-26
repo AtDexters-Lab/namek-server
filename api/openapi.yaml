@@ -229,11 +229,13 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
 
-  /api/v1/tokens/verify:
+  /internal/v1/tokens/verify:
     post:
-      summary: Verify a Nexus JWT token (called by Nexus)
+      summary: Verify a Nexus JWT token (Nexus mTLS-authenticated)
       operationId: verifyToken
       tags: [Token]
+      security:
+        - mTLS: []
       requestBody:
         required: true
         content:

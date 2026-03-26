@@ -42,9 +42,9 @@ See `api/openapi.yaml` for full specification.
 
 ### Nexus (mTLS)
 - `POST /internal/v1/nexus/register` — Registration + heartbeat
+- `POST /internal/v1/tokens/verify` — Remote token verification
 
 ### Public (no auth)
-- `POST /api/v1/tokens/verify` — Remote token verification
 - `GET /health`, `GET /ready` — System health
 
 ## Database Schema
