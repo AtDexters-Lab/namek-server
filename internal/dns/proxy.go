@@ -8,6 +8,8 @@ import (
 	"net"
 	"sync"
 	"time"
+
+	"github.com/AtDexters-Lab/namek-server/internal/metrics"
 )
 
 const (
@@ -95,10 +97,12 @@ func (p *Proxy) serveUDP(ctx context.Context) {
 			return
 		}
 
+		metrics.Get().DNS.UDPQueries.Add(1)
+
 		select {
 		case sem <- struct{}{}:
 		default:
-			// Drop packet under overload
+			metrics.Get().DNS.UDPDropped.Add(1)
 			continue
 		}
 
@@ -120,6 +124,7 @@ func (p *Proxy) serveUDP(ctx context.Context) {
 func (p *Proxy) handleUDP(query []byte, clientAddr net.Addr) {
 	upstream, err := net.Dial("udp", p.upstreamAddr)
 	if err != nil {
+		metrics.Get().DNS.Errors.Add(1)
 		p.logger.Error("dns proxy udp dial upstream", "error", err)
 		return
 	}
@@ -128,6 +133,7 @@ func (p *Proxy) handleUDP(query []byte, clientAddr net.Addr) {
 	upstream.SetDeadline(time.Now().Add(5 * time.Second))
 
 	if _, err := upstream.Write(query); err != nil {
+		metrics.Get().DNS.Errors.Add(1)
 		p.logger.Error("dns proxy udp write upstream", "error", err)
 		return
 	}
@@ -137,11 +143,13 @@ func (p *Proxy) handleUDP(query []byte, clientAddr net.Addr) {
 
 	n, err := upstream.Read(resp)
 	if err != nil {
+		metrics.Get().DNS.Errors.Add(1)
 		p.logger.Error("dns proxy udp read upstream", "error", err)
 		return
 	}
 
 	if _, err := p.udpConn.WriteTo(resp[:n], clientAddr); err != nil {
+		metrics.Get().DNS.Errors.Add(1)
 		p.logger.Error("dns proxy udp write client", "error", err)
 	}
 }
@@ -164,9 +172,12 @@ func (p *Proxy) serveTCP(ctx context.Context) {
 			return
 		}
 
+		metrics.Get().DNS.TCPQueries.Add(1)
+
 		select {
 		case sem <- struct{}{}:
 		default:
+			metrics.Get().DNS.TCPDropped.Add(1)
 			conn.Close()
 			continue
 		}
@@ -187,6 +198,7 @@ func (p *Proxy) handleTCP(client net.Conn) {
 
 	upstream, err := net.DialTimeout("tcp", p.upstreamAddr, 5*time.Second)
 	if err != nil {
+		metrics.Get().DNS.Errors.Add(1)
 		p.logger.Error("dns proxy tcp dial upstream", "error", err)
 		return
 	}

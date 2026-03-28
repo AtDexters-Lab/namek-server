@@ -14,6 +14,7 @@ import (
 
 	"github.com/AtDexters-Lab/namek-server/internal/config"
 	"github.com/AtDexters-Lab/namek-server/internal/dns"
+	"github.com/AtDexters-Lab/namek-server/internal/metrics"
 	"github.com/AtDexters-Lab/namek-server/internal/model"
 	"github.com/AtDexters-Lab/namek-server/internal/store"
 )
@@ -85,6 +86,7 @@ func (s *NexusService) Register(ctx context.Context, req RegisterNexusRequest) (
 			s.auditStore.LogAction(ctx, model.ActorTypeNexus, req.Hostname,
 				"nexus.reactivated", "nexus_instance", strPtr(req.Hostname),
 				map[string]any{"dns_resolution_failed": true, "backend_port": req.BackendPort}, nil)
+			metrics.Get().Nexus.Reactivated.Add(1)
 		}
 
 		return &RegisterNexusResponse{
@@ -141,6 +143,7 @@ func (s *NexusService) Register(ctx context.Context, req RegisterNexusRequest) (
 	s.auditStore.LogAction(ctx, model.ActorTypeNexus, req.Hostname,
 		"nexus.registered", "nexus_instance", strPtr(req.Hostname),
 		map[string]any{"resolved_ips": ips, "region": region, "backend_port": req.BackendPort}, nil)
+	metrics.Get().Nexus.Registered.Add(1)
 
 	s.logger.Info("nexus registered",
 		"hostname", req.Hostname,
@@ -202,6 +205,7 @@ func (s *NexusService) healthCheck(ctx context.Context) {
 		for _, id := range inactiveIDs {
 			s.auditStore.LogAction(ctx, model.ActorTypeSystem, "health_check",
 				"nexus.inactive", "nexus_instance", strPtr(id.String()), nil, nil)
+			metrics.Get().Nexus.MarkedInactive.Add(1)
 		}
 
 		// Update relay DNS

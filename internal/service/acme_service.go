@@ -11,6 +11,7 @@ import (
 
 	"github.com/AtDexters-Lab/namek-server/internal/config"
 	"github.com/AtDexters-Lab/namek-server/internal/dns"
+	"github.com/AtDexters-Lab/namek-server/internal/metrics"
 	"github.com/AtDexters-Lab/namek-server/internal/model"
 	"github.com/AtDexters-Lab/namek-server/internal/store"
 )
@@ -107,6 +108,7 @@ func (s *ACMEService) CreateChallenge(ctx context.Context, req CreateChallengeRe
 				)
 			}
 		}
+		metrics.Get().ACME.DNSSetFailed.Add(1)
 		return nil, fmt.Errorf("set dns txt record: %w", err)
 	}
 
@@ -115,6 +117,7 @@ func (s *ACMEService) CreateChallenge(ctx context.Context, req CreateChallengeRe
 		"fqdn", fqdn,
 	)
 
+	metrics.Get().ACME.ChallengesCreated.Add(1)
 	return &CreateChallengeResponse{
 		ID:   challenge.ID,
 		FQDN: fqdn,
@@ -141,7 +144,11 @@ func (s *ACMEService) DeleteChallenge(ctx context.Context, challengeID uuid.UUID
 		// Continue to delete from DB even if DNS cleanup fails
 	}
 
-	return s.acmeStore.Delete(ctx, challengeID)
+	if err := s.acmeStore.Delete(ctx, challengeID); err != nil {
+		return err
+	}
+	metrics.Get().ACME.ChallengesDeleted.Add(1)
+	return nil
 }
 
 // CleanupLoop removes expired ACME challenges.
@@ -189,6 +196,7 @@ func (s *ACMEService) cleanup(ctx context.Context) {
 			)
 			continue
 		}
+		metrics.Get().ACME.ChallengesExpired.Add(1)
 		cleaned++
 	}
 

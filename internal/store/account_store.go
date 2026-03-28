@@ -112,6 +112,11 @@ func (s *AccountStore) DeleteEmpty(ctx context.Context, accountID uuid.UUID) err
 	return nil
 }
 
+// CountByStatus returns account counts grouped by status.
+func (s *AccountStore) CountByStatus(ctx context.Context) (map[string]int, error) {
+	return countGroupBy(ctx, s.pool, "accounts", "status")
+}
+
 // CountDevices returns the number of devices in an account.
 func (s *AccountStore) CountDevices(ctx context.Context, accountID uuid.UUID) (int, error) {
 	var count int

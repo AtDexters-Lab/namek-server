@@ -447,3 +447,35 @@ func scanPCRCensus(row pgx.Row) (*model.PCRCensus, error) {
 	}
 	return p, nil
 }
+
+// IssuerSummary holds aggregate counts of EK issuers by tier.
+type IssuerSummary struct {
+	Total   int            `json:"total"`
+	ByTier  map[string]int `json:"by_tier"`
+	Flagged int            `json:"flagged"`
+}
+
+// GetIssuerSummary returns aggregate counts of issuers grouped by tier, plus flagged count.
+func (s *CensusStore) GetIssuerSummary(ctx context.Context) (*IssuerSummary, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT tier, COUNT(*), SUM(CASE WHEN flagged THEN 1 ELSE 0 END)
+		FROM ek_issuer_census GROUP BY tier
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("issuer summary: %w", err)
+	}
+	defer rows.Close()
+
+	summary := &IssuerSummary{ByTier: make(map[string]int)}
+	for rows.Next() {
+		var tier string
+		var count, flagged int
+		if err := rows.Scan(&tier, &count, &flagged); err != nil {
+			return nil, fmt.Errorf("scan issuer summary: %w", err)
+		}
+		summary.ByTier[tier] = count
+		summary.Total += count
+		summary.Flagged += flagged
+	}
+	return summary, rows.Err()
+}

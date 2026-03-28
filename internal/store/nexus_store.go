@@ -137,6 +137,11 @@ func (s *NexusStore) UpdateResolvedAddresses(ctx context.Context, id uuid.UUID, 
 	return nil
 }
 
+// CountByStatus returns nexus instance counts grouped by status.
+func (s *NexusStore) CountByStatus(ctx context.Context) (map[string]int, error) {
+	return countGroupBy(ctx, s.pool, "nexus_instances", "status")
+}
+
 func parseIPs(strs []string) []net.IP {
 	ips := make([]net.IP, 0, len(strs))
 	for _, s := range strs {

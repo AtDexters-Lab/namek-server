@@ -19,6 +19,7 @@ import (
 
 	"github.com/AtDexters-Lab/namek-server/internal/config"
 	"github.com/AtDexters-Lab/namek-server/internal/identity"
+	"github.com/AtDexters-Lab/namek-server/internal/metrics"
 	"github.com/AtDexters-Lab/namek-server/internal/model"
 	"github.com/AtDexters-Lab/namek-server/internal/slug"
 	"github.com/AtDexters-Lab/namek-server/internal/store"
@@ -77,7 +78,7 @@ type DeviceService struct {
 
 	reservedHostnames map[string]bool
 
-	mu      sync.Mutex
+	mu      sync.RWMutex
 	pending map[string]*PendingEnrollment // keyed by nonce
 	ekIndex map[string]string             // ek_fingerprint -> nonce (for dedup)
 }
@@ -115,6 +116,13 @@ func NewDeviceService(deviceStore *store.DeviceStore, accountStore *store.Accoun
 		ekIndex:           make(map[string]string),
 	}
 	return svc
+}
+
+// PendingCount returns the number of pending enrollments.
+func (s *DeviceService) PendingCount() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.pending)
 }
 
 // SetRecoveryProcessor sets the recovery processor for handling recovery bundles.
@@ -193,6 +201,7 @@ func (s *DeviceService) StartEnrollment(ctx context.Context, req EnrollRequest, 
 	}
 
 	if len(s.pending) >= s.cfg.Enrollment.MaxPending {
+		metrics.Get().Enroll.Phase1CapacityExceeded.Add(1)
 		return nil, ErrEnrollmentCapacity
 	}
 
@@ -219,6 +228,7 @@ func (s *DeviceService) StartEnrollment(ctx context.Context, req EnrollRequest, 
 		"client_ip", req.ClientIP,
 	)
 
+	metrics.Get().Enroll.Phase1Started.Add(1)
 	return &EnrollResponse{
 		Nonce:         nonce,
 		EncCredential: encCredential,
@@ -253,6 +263,7 @@ func (s *DeviceService) CompleteEnrollment(ctx context.Context, req AttestReques
 	pe, ok := s.pending[req.Nonce]
 	if !ok {
 		s.mu.Unlock()
+		metrics.Get().Enroll.Phase2Failed.Add(1)
 		return nil, ErrPendingNotFound
 	}
 
@@ -260,6 +271,7 @@ func (s *DeviceService) CompleteEnrollment(ctx context.Context, req AttestReques
 		delete(s.pending, req.Nonce)
 		delete(s.ekIndex, pe.EKFingerprint)
 		s.mu.Unlock()
+		metrics.Get().Enroll.Phase2Failed.Add(1)
 		return nil, ErrPendingNotFound
 	}
 
@@ -267,6 +279,15 @@ func (s *DeviceService) CompleteEnrollment(ctx context.Context, req AttestReques
 	delete(s.pending, req.Nonce)
 	delete(s.ekIndex, pe.EKFingerprint)
 	s.mu.Unlock()
+
+	// From here, any error return is a phase 2 failure (pending already consumed).
+	// Success paths set phase2OK before incrementing their specific counter.
+	var phase2OK bool
+	defer func() {
+		if !phase2OK {
+			metrics.Get().Enroll.Phase2Failed.Add(1)
+		}
+	}()
 
 	// Verify secret
 	if !equalBytes(req.Secret, pe.ChallengeSecret) {
@@ -326,6 +347,8 @@ func (s *DeviceService) CompleteEnrollment(ctx context.Context, req AttestReques
 
 		s.auditStore.LogAction(ctx, model.ActorTypeDevice, device.ID.String(),
 			"device.reenrolled", "device", strPtr(device.ID.String()), nil, req.ClientIP)
+		phase2OK = true
+		metrics.Get().Enroll.Reenrolled.Add(1)
 
 		s.logger.Info("device re-enrolled",
 			"device_id", device.ID,
@@ -448,6 +471,8 @@ func (s *DeviceService) CompleteEnrollment(ctx context.Context, req AttestReques
 	s.auditStore.LogAction(ctx, model.ActorTypeDevice, deviceID.String(),
 		"device.enrolled", "device", strPtr(deviceID.String()),
 		map[string]string{"identity_class": identityClass, "trust_level": string(trustLevel)}, req.ClientIP)
+	phase2OK = true
+	metrics.Get().Enroll.Phase2Completed.Add(1)
 
 	s.logger.Info("device enrolled",
 		"device_id", deviceID,

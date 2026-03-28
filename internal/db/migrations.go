@@ -8,7 +8,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const currentVersion = 1
+const currentVersion = 2
 
 var migrations = []string{
 	// Version 1: Consolidated schema (original + ACME certs + backend port + RFC 004 stateless resilience)
@@ -227,6 +227,9 @@ var migrations = []string{
 
 	CREATE INDEX IF NOT EXISTS idx_pcr_census_majority
 		ON pcr_census(grouping_key, pcr_group) WHERE is_majority = TRUE;`,
+
+	// Version 2: Audit log index for dashboard query performance
+	`CREATE INDEX IF NOT EXISTS idx_audit_log_action_id ON audit_log(action text_pattern_ops, id DESC);`,
 }
 
 func Migrate(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger) error {

@@ -13,6 +13,7 @@ import (
 	"github.com/AtDexters-Lab/namek-server/internal/api/handler"
 	"github.com/AtDexters-Lab/namek-server/internal/auth"
 	"github.com/AtDexters-Lab/namek-server/internal/config"
+	"github.com/AtDexters-Lab/namek-server/internal/metrics"
 	"github.com/AtDexters-Lab/namek-server/internal/dns"
 	"github.com/AtDexters-Lab/namek-server/internal/service"
 	"github.com/AtDexters-Lab/namek-server/internal/store"
@@ -50,6 +51,7 @@ func NewRouter(deps RouterDeps) http.Handler {
 	r.Use(gin.Recovery())
 	r.Use(auth.RequestIDMiddleware())
 	r.Use(loggerMiddleware(deps.Logger))
+	r.Use(metricsMiddleware())
 
 	// Handlers
 	healthH := handler.NewHealthHandler(deps.Pool)
@@ -181,6 +183,27 @@ func NewRouter(deps RouterDeps) http.Handler {
 	// not the public HTTPS listener. See internal/admin/webui.go.
 
 	return r
+}
+
+func metricsMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Next()
+		path := c.Request.URL.Path
+		if path == "/health" || path == "/ready" {
+			return
+		}
+		m := metrics.Get()
+		switch status := c.Writer.Status(); {
+		case status == 429:
+			m.HTTP.Requests429.Add(1)
+		case status >= 500:
+			m.HTTP.Requests5xx.Add(1)
+		case status >= 400:
+			m.HTTP.Requests4xx.Add(1)
+		default:
+			m.HTTP.Requests2xx.Add(1)
+		}
+	}
 }
 
 func loggerMiddleware(logger *slog.Logger) gin.HandlerFunc {

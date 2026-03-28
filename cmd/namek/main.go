@@ -364,6 +364,13 @@ func main() {
 			AccountStore:  stores.Account,
 			CensusSvc:     censusSvc,
 			RecoverySvc:   recoverySvc,
+
+			NexusStore:             stores.Nexus,
+			Pool:                   pool,
+			NonceStore:             nonceStore,
+			PendingCounter:         deviceSvc,
+			CensusAnalysisInterval: cfg.CensusAnalysisInterval(),
+			MaxPendingEnrollments:  cfg.Enrollment.MaxPending,
 		})
 		if err != nil {
 			logger.Error("failed to create admin handler", "error", err)

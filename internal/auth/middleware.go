@@ -13,6 +13,8 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
+	"github.com/AtDexters-Lab/namek-server/internal/metrics"
+
 	"github.com/AtDexters-Lab/namek-server/internal/config"
 	"github.com/AtDexters-Lab/namek-server/internal/httputil"
 	"github.com/AtDexters-Lab/namek-server/internal/model"
@@ -217,6 +219,7 @@ func DeviceRateLimit(mutPerMin, mutBurst, readPerMin, readBurst int) gin.Handler
 		}
 
 		if !b.TryConsume() {
+			metrics.Get().RateLimit.RejectedPerDevice.Add(1)
 			c.Header("Retry-After", fmt.Sprintf("%d", b.RetryAfterSecs()))
 			httputil.RespondError(c, http.StatusTooManyRequests, "rate limit exceeded")
 			c.Abort()
@@ -237,6 +240,7 @@ func RateLimit(globalRPS, globalBurst, perIPRPS, perIPBurst int) gin.HandlerFunc
 		ip := c.ClientIP()
 		ipb := ipBuckets.GetOrCreate(ip, float64(perIPRPS), float64(perIPBurst))
 		if !ipb.TryConsume() {
+			metrics.Get().RateLimit.RejectedPerIP.Add(1)
 			c.Header("Retry-After", fmt.Sprintf("%d", ipb.RetryAfterSecs()))
 			httputil.RespondError(c, http.StatusTooManyRequests, "rate limit exceeded")
 			c.Abort()
@@ -245,6 +249,7 @@ func RateLimit(globalRPS, globalBurst, perIPRPS, perIPBurst int) gin.HandlerFunc
 
 		// Global rate limit
 		if !globalBucket.TryConsume() {
+			metrics.Get().RateLimit.RejectedGlobal.Add(1)
 			c.Header("Retry-After", fmt.Sprintf("%d", globalBucket.RetryAfterSecs()))
 			httputil.RespondError(c, http.StatusTooManyRequests, "rate limit exceeded")
 			c.Abort()

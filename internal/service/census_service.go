@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/AtDexters-Lab/namek-server/internal/config"
+	"github.com/AtDexters-Lab/namek-server/internal/metrics"
 	"github.com/AtDexters-Lab/namek-server/internal/model"
 	"github.com/AtDexters-Lab/namek-server/internal/store"
 	"github.com/AtDexters-Lab/namek-server/internal/tpm"
@@ -63,6 +64,7 @@ func (s *CensusService) Run(ctx context.Context) {
 		case <-ticker.C:
 			if err := s.Analyze(ctx); err != nil {
 				s.logger.Error("census analysis failed", "error", err)
+				metrics.Get().Census.RunsFailed.Add(1)
 			}
 		}
 	}
@@ -85,20 +87,34 @@ func (s *CensusService) Analyze(ctx context.Context) error {
 	s.logger.Info("census analysis started")
 	start := time.Now()
 
+	var stageFailed bool
 	if err := s.recomputeIssuerCounts(ctx); err != nil {
 		s.logger.Error("recompute issuer counts failed", "error", err)
+		stageFailed = true
 	}
 	if err := s.reEvaluateIssuerTiers(ctx); err != nil {
 		s.logger.Error("issuer tier re-evaluation failed", "error", err)
+		stageFailed = true
 	}
 	if err := s.recalculatePCRMajorities(ctx); err != nil {
 		s.logger.Error("PCR majority recalculation failed", "error", err)
+		stageFailed = true
 	}
 	if err := s.recomputeDeviceTrustLevels(ctx); err != nil {
 		s.logger.Error("device trust level recomputation failed", "error", err)
+		stageFailed = true
 	}
 
-	s.logger.Info("census analysis completed", "duration_ms", time.Since(start).Milliseconds())
+	duration := time.Since(start).Milliseconds()
+	metrics.Get().Census.LastDurationMs.Store(duration)
+	if stageFailed {
+		s.logger.Warn("census analysis completed with errors", "duration_ms", duration)
+		metrics.Get().Census.RunsFailed.Add(1)
+	} else {
+		s.logger.Info("census analysis completed", "duration_ms", duration)
+		metrics.Get().Census.RunsCompleted.Add(1)
+		metrics.Get().Census.LastCompletedAt.Store(time.Now().Unix())
+	}
 	return nil
 }
 

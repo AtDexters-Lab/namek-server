@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/AtDexters-Lab/namek-server/internal/metrics"
 	"github.com/AtDexters-Lab/namek-server/internal/model"
 )
 
@@ -314,6 +315,8 @@ func (b *LastSeenBatcher) Flush(ctx context.Context) {
 		chunk := entries[i:end]
 
 		if err := b.flushChunk(ctx, chunk); err != nil {
+			metrics.Get().LastSeen.FlushErrors.Add(1)
+			metrics.Get().LastSeen.EntriesDropped.Add(int64(len(chunk)))
 			b.logger.Warn("last_seen batch flush failed",
 				"error", err,
 				"batch_size", len(chunk),
@@ -322,6 +325,7 @@ func (b *LastSeenBatcher) Flush(ctx context.Context) {
 			// Discard on failure — last_seen_at is advisory data
 			continue
 		}
+		metrics.Get().LastSeen.FlushSuccess.Add(1)
 	}
 
 	b.logger.Debug("last_seen batch flush",
@@ -345,7 +349,7 @@ func (b *LastSeenBatcher) flushChunk(ctx context.Context, chunk []flushEntry) er
 			sb.WriteString(", ")
 		}
 		argBase := i * 3
-		fmt.Fprintf(&sb, "($%d::uuid, $%d::timestamptz, $%d::text)", argBase+1, argBase+2, argBase+3)
+		fmt.Fprintf(&sb, "($%d::uuid, $%d::timestamptz, $%d::inet)", argBase+1, argBase+2, argBase+3)
 		args = append(args, entry.id, entry.e.timestamp, ipToString(entry.e.ip))
 	}
 	sb.WriteString(") AS v(id, ts, ip) WHERE d.id = v.id")
@@ -531,6 +535,18 @@ func CreateDeviceWithAccount(ctx context.Context, pool *pgxpool.Pool, account *m
 
 	account.CreatedAt = time.Now()
 	return nil
+}
+
+func (s *DeviceStore) CountByStatus(ctx context.Context) (map[string]int, error) {
+	return countGroupBy(ctx, s.pool, "devices", "status")
+}
+
+func (s *DeviceStore) CountByTrustLevel(ctx context.Context) (map[string]int, error) {
+	return countGroupBy(ctx, s.pool, "devices", "trust_level")
+}
+
+func (s *DeviceStore) CountByIdentityClass(ctx context.Context) (map[string]int, error) {
+	return countGroupBy(ctx, s.pool, "devices", "identity_class")
 }
 
 // CreateDeviceWithRecoveryAccount creates a recovery account (ON CONFLICT DO NOTHING)

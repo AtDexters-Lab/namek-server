@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Namek Dashboard</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,monospace;background:#0d1117;color:#c9d1d9;font-size:14px;line-height:1.5}
+.container{max-width:1200px;margin:0 auto;padding:16px}
+h1{font-size:20px;font-weight:600;color:#58a6ff;margin-bottom:16px;display:flex;align-items:center;gap:8px}
+h1 .status{font-size:12px;color:#8b949e;font-weight:400}
+h2{font-size:15px;font-weight:600;color:#c9d1d9;margin-bottom:8px;padding-bottom:4px;border-bottom:1px solid #21262d}
+.grid{display:grid;gap:12px;margin-bottom:16px}
+.grid-2{grid-template-columns:1fr 1fr}
+.grid-3{grid-template-columns:1fr 1fr 1fr}
+.grid-4{grid-template-columns:1fr 1fr 1fr 1fr}
+.card{background:#161b22;border:1px solid #21262d;border-radius:6px;padding:12px}
+.metric{display:flex;flex-direction:column}
+.metric .label{font-size:11px;color:#8b949e;text-transform:uppercase;letter-spacing:0.5px}
+.metric .value{font-size:24px;font-weight:600;color:#f0f6fc}
+.metric .sub{font-size:11px;color:#8b949e}
+.bar-group{display:flex;flex-direction:column;gap:4px}
+.bar-row{display:flex;align-items:center;gap:8px}
+.bar-row .bar-label{width:100px;font-size:12px;color:#8b949e;text-align:right;flex-shrink:0}
+.bar-row .bar-track{flex:1;height:18px;background:#21262d;border-radius:3px;overflow:hidden;position:relative}
+.bar-row .bar-fill{height:100%;border-radius:3px;transition:width 0.3s}
+.bar-row .bar-count{position:absolute;right:4px;top:0;line-height:18px;font-size:11px;color:#c9d1d9}
+.color-strong{background:#3fb950}.color-standard{background:#58a6ff}.color-provisional{background:#d29922}
+.color-suspicious{background:#f85149}.color-quarantine{background:#da3633}.color-software{background:#8b949e}
+.color-verified{background:#3fb950}.color-crowd{background:#58a6ff}.color-unverified{background:#d29922}
+.alert-bar{margin-bottom:12px}
+.alert{padding:8px 12px;border-radius:6px;margin-bottom:6px;display:flex;gap:8px;align-items:flex-start;font-size:13px}
+.alert.warning{background:#2d1b00;border:1px solid #d29922;color:#f0c040}
+.alert.info{background:#0c2d6b;border:1px solid #58a6ff;color:#79c0ff}
+.alert .alert-action{color:#8b949e;font-size:12px}
+.alert .badge{font-size:11px;font-weight:600;padding:1px 6px;border-radius:10px;flex-shrink:0}
+.alert.warning .badge{background:#d29922;color:#0d1117}
+.alert.info .badge{background:#58a6ff;color:#0d1117}
+.funnel{display:flex;align-items:center;gap:4px;margin:8px 0}
+.funnel .stage{text-align:center;padding:6px 12px;border-radius:4px;font-size:13px;font-weight:600}
+.funnel .arrow{color:#484f58;font-size:16px}
+.funnel .stage.start{background:#1f3a1f;color:#3fb950}
+.funnel .stage.end{background:#0c2d6b;color:#58a6ff}
+.funnel .stage.fail{background:#3d1214;color:#f85149}
+.funnel .stage.reenroll{background:#2d1b00;color:#d29922}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{text-align:left;padding:6px 8px;border-bottom:1px solid #30363d;color:#8b949e;font-weight:500;font-size:11px;text-transform:uppercase}
+td{padding:6px 8px;border-bottom:1px solid #21262d;color:#c9d1d9}
+tr:hover td{background:#1c2128}
+.filters{display:flex;gap:8px;margin-bottom:8px;align-items:center}
+.filters select,.filters button{background:#21262d;color:#c9d1d9;border:1px solid #30363d;padding:4px 8px;border-radius:4px;font-size:12px;cursor:pointer}
+.filters button:hover{background:#30363d}
+.error-indicator{color:#f85149;font-size:12px;font-style:italic}
+.restart-banner{background:#2d1b00;border:1px solid #d29922;padding:6px 12px;border-radius:6px;margin-bottom:12px;font-size:13px;color:#f0c040;text-align:center}
+.rate{font-size:11px;color:#58a6ff}
+.pair{display:flex;gap:16px;flex-wrap:wrap}
+.pair .metric{flex:1;min-width:80px}
+</style>
+</head>
+<body>
+<div class="container">
+<h1>Namek Dashboard <span class="status" id="conn-status">connecting...</span></h1>
+
+<div id="restart-banner" class="restart-banner" style="display:none">Server restarted — metrics baseline reset</div>
+
+<div id="alerts" class="alert-bar"></div>
+
+<div class="grid grid-2">
+<div class="card">
+<h2>System</h2>
+<div class="pair" id="system-metrics">
+<div class="metric"><span class="label">Uptime</span><span class="value" id="uptime">-</span></div>
+<div class="metric"><span class="label">Goroutines</span><span class="value" id="goroutines">-</span></div>
+<div class="metric"><span class="label">Heap</span><span class="value" id="heap">-</span><span class="sub">MB</span></div>
+<div class="metric"><span class="label">DB Pool</span><span class="value" id="dbpool">-</span><span class="sub" id="dbpool-detail"></span></div>
+</div>
+</div>
+
+<div class="card">
+<h2>Nonce Store</h2>
+<div class="pair">
+<div class="metric"><span class="label">Utilization</span><span class="value" id="nonce-util">-</span><span class="sub">%</span></div>
+<div class="metric"><span class="label">Count</span><span class="value" id="nonce-count">-</span><span class="sub" id="nonce-max"></span></div>
+</div>
+</div>
+</div>
+
+<div class="grid grid-2">
+<div class="card">
+<h2>Traffic <span class="rate" id="traffic-rate"></span></h2>
+<div class="pair">
+<div class="metric"><span class="label">2xx</span><span class="value" id="http-2xx">-</span></div>
+<div class="metric"><span class="label">4xx</span><span class="value" id="http-4xx">-</span></div>
+<div class="metric"><span class="label">429</span><span class="value" id="http-429">-</span></div>
+<div class="metric"><span class="label">5xx</span><span class="value" id="http-5xx">-</span></div>
+</div>
+</div>
+
+<div class="card">
+<h2>Enrollment Funnel</h2>
+<div class="funnel">
+<div class="stage start" id="enroll-started">- started</div>
+<div class="arrow">&rarr;</div>
+<div class="stage end" id="enroll-completed">- completed</div>
+<div class="stage fail" id="enroll-failed">- failed</div>
+<div class="stage reenroll" id="enroll-reenrolled">- re-enrolled</div>
+</div>
+<div class="sub" id="enroll-pending"></div>
+</div>
+</div>
+
+<div class="grid grid-2">
+<div class="card">
+<h2>Fleet — Trust Levels</h2>
+<div class="bar-group" id="trust-bars"></div>
+</div>
+<div class="card">
+<h2>Fleet — Identity Classes</h2>
+<div class="bar-group" id="class-bars"></div>
+</div>
+</div>
+
+<div class="grid grid-4">
+<div class="card"><div class="metric"><span class="label">Devices</span><span class="value" id="fleet-devices">-</span></div></div>
+<div class="card"><div class="metric"><span class="label">Accounts</span><span class="value" id="fleet-accounts">-</span><span class="sub" id="fleet-recovery"></span></div></div>
+<div class="card"><div class="metric"><span class="label">Nexus Active</span><span class="value" id="fleet-nexus">-</span></div></div>
+<div class="card"><div class="metric"><span class="label">Issuers</span><span class="value" id="fleet-issuers">-</span><span class="sub" id="fleet-flagged"></span></div></div>
+</div>
+
+<div class="grid grid-3">
+<div class="card">
+<h2>Rate Limiting</h2>
+<div class="pair">
+<div class="metric"><span class="label">Per-IP</span><span class="value" id="rl-ip">-</span></div>
+<div class="metric"><span class="label">Global</span><span class="value" id="rl-global">-</span></div>
+<div class="metric"><span class="label">Per-Device</span><span class="value" id="rl-device">-</span></div>
+</div>
+</div>
+<div class="card">
+<h2>DNS Proxy</h2>
+<div class="pair">
+<div class="metric"><span class="label">UDP</span><span class="value" id="dns-udp">-</span></div>
+<div class="metric"><span class="label">TCP</span><span class="value" id="dns-tcp">-</span></div>
+<div class="metric"><span class="label">Dropped</span><span class="value" id="dns-dropped">-</span></div>
+</div>
+</div>
+<div class="card">
+<h2>ACME</h2>
+<div class="pair">
+<div class="metric"><span class="label">Created</span><span class="value" id="acme-created">-</span></div>
+<div class="metric"><span class="label">Expired</span><span class="value" id="acme-expired">-</span></div>
+<div class="metric"><span class="label">DNS Fail</span><span class="value" id="acme-dnsfail">-</span></div>
+</div>
+</div>
+</div>
+
+<div class="card" style="margin-bottom:16px">
+<h2>Census</h2>
+<div class="pair">
+<div class="metric"><span class="label">Runs</span><span class="value" id="census-runs">-</span></div>
+<div class="metric"><span class="label">Failed</span><span class="value" id="census-failed">-</span></div>
+<div class="metric"><span class="label">Last Run</span><span class="value" id="census-last" style="font-size:14px">-</span></div>
+<div class="metric"><span class="label">Duration</span><span class="value" id="census-duration">-</span><span class="sub">ms</span></div>
+</div>
+</div>
+
+<div class="card">
+<h2>Audit Log</h2>
+<div class="filters">
+<select id="audit-action">
+<option value="">All actions</option>
+<option value="device.">device.*</option>
+<option value="nexus.">nexus.*</option>
+<option value="domain.">domain.*</option>
+<option value="account.">account.*</option>
+<option value="recovery.">recovery.*</option>
+<option value="issuer.">issuer.*</option>
+<option value="voucher.">voucher.*</option>
+</select>
+<select id="audit-actor">
+<option value="">All actors</option>
+<option value="device">device</option>
+<option value="nexus">nexus</option>
+<option value="system">system</option>
+<option value="operator">operator</option>
+</select>
+<button onclick="loadAudit()">Refresh</button>
+</div>
+<div id="audit-error" class="error-indicator" style="display:none"></div>
+<table>
+<thead><tr><th>Time</th><th>Action</th><th>Actor</th><th>Resource</th><th>Details</th></tr></thead>
+<tbody id="audit-body"></tbody>
+</table>
+<div style="text-align:center;margin-top:8px">
+<button id="audit-more" onclick="loadAuditMore()" style="display:none">Load older</button>
+</div>
+</div>
+</div>
+
+<script>
+const BASE = '/operator/v1';
+let prevMetrics = null;
+let prevUptime = null;
+let auditCursor = null;
+
+function fmt(n) {
+  if (n === undefined || n === null) return '0';
+  if (n >= 1e6) return (n/1e6).toFixed(1)+'M';
+  if (n >= 1e3) return (n/1e3).toFixed(1)+'K';
+  return String(n);
+}
+
+function fmtDuration(secs) {
+  if (secs < 60) return secs + 's';
+  if (secs < 3600) return Math.floor(secs/60) + 'm';
+  if (secs < 86400) return Math.floor(secs/3600) + 'h ' + Math.floor((secs%3600)/60) + 'm';
+  return Math.floor(secs/86400) + 'd ' + Math.floor((secs%86400)/3600) + 'h';
+}
+
+function fmtTime(ts) {
+  const d = new Date(ts);
+  return d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'});
+}
+
+function el(id) { return document.getElementById(id); }
+
+function esc(s) {
+  if (s === null || s === undefined) return '';
+  const d = document.createElement('div');
+  d.textContent = String(s);
+  return d.innerHTML;
+}
+
+function renderBars(containerId, data, colorMap, maxVal) {
+  const container = el(containerId);
+  if (!data || !maxVal) { container.innerHTML = '<span class="sub">No data</span>'; return; }
+  let html = '';
+  for (const [key, count] of Object.entries(data)) {
+    const pct = Math.max(1, (count / maxVal) * 100);
+    const color = colorMap[key] || 'color-software';
+    html += '<div class="bar-row"><span class="bar-label">' + esc(key) + '</span>' +
+      '<span class="bar-track"><span class="bar-fill ' + color + '" style="width:' + pct + '%"></span>' +
+      '<span class="bar-count">' + esc(count) + '</span></span></div>';
+  }
+  container.innerHTML = html;
+}
+
+async function fetchJSON(path) {
+  const r = await fetch(BASE + path);
+  if (!r.ok) throw new Error(r.status);
+  return r.json();
+}
+
+async function refresh() {
+  try {
+    const [health, metricsData, fleet] = await Promise.all([
+      fetchJSON('/system/health'),
+      fetchJSON('/system/metrics'),
+      fetchJSON('/fleet/summary'),
+    ]);
+
+    el('conn-status').textContent = 'live';
+
+    // Restart detection
+    const uptime = health.uptime_seconds;
+    let restarted = false;
+    if (prevUptime !== null && uptime < prevUptime) restarted = true;
+    if (prevMetrics && !restarted) {
+      for (const [k,v] of Object.entries(metricsData.http || {})) {
+        if (prevMetrics.http && prevMetrics.http[k] > v) { restarted = true; break; }
+      }
+    }
+    if (restarted) {
+      el('restart-banner').style.display = '';
+      prevMetrics = null;
+      setTimeout(() => el('restart-banner').style.display = 'none', 30000);
+    }
+    prevUptime = uptime;
+
+    // System
+    el('uptime').textContent = fmtDuration(uptime);
+    el('goroutines').textContent = health.go.goroutines;
+    el('heap').textContent = health.go.heap_alloc_mb.toFixed(1);
+    el('dbpool').textContent = health.db_pool.acquired + '/' + health.db_pool.max;
+    el('dbpool-detail').textContent = health.db_pool.idle + ' idle';
+    el('nonce-util').textContent = health.nonce_store.utilization_pct.toFixed(1);
+    el('nonce-count').textContent = fmt(health.nonce_store.count);
+    el('nonce-max').textContent = '/ ' + fmt(health.nonce_store.max);
+
+    // Alerts
+    const alertsHtml = (health.alerts || []).map(a =>
+      '<div class="alert ' + esc(a.severity) + '"><span class="badge">' + esc(a.severity) + '</span>' +
+      '<div><strong>' + esc(a.component) + ':</strong> ' + esc(a.message) +
+      '<div class="alert-action">' + esc(a.action) + '</div></div></div>'
+    ).join('');
+    el('alerts').innerHTML = alertsHtml;
+
+    // Traffic
+    const m = metricsData;
+    el('http-2xx').textContent = fmt(m.http.requests_2xx);
+    el('http-4xx').textContent = fmt(m.http.requests_4xx);
+    el('http-429').textContent = fmt(m.http.requests_429);
+    el('http-5xx').textContent = fmt(m.http.requests_5xx);
+
+    if (prevMetrics && !restarted) {
+      const total = (m.http.requests_2xx + m.http.requests_4xx + m.http.requests_429 + m.http.requests_5xx) -
+        (prevMetrics.http.requests_2xx + prevMetrics.http.requests_4xx + prevMetrics.http.requests_429 + prevMetrics.http.requests_5xx);
+      el('traffic-rate').textContent = (total / 10).toFixed(1) + ' req/s';
+    }
+
+    // Enrollment
+    el('enroll-started').textContent = fmt(m.enrollment.phase1_started) + ' started';
+    el('enroll-completed').textContent = fmt(m.enrollment.phase2_completed) + ' completed';
+    el('enroll-failed').textContent = fmt(m.enrollment.phase2_failed) + ' failed';
+    el('enroll-reenrolled').textContent = fmt(m.enrollment.reenrolled) + ' re-enrolled';
+    el('enroll-pending').textContent = 'Pending: ' + health.pending_enrollments;
+
+    // Rate limiting
+    el('rl-ip').textContent = fmt(m.rate_limit.rejected_per_ip);
+    el('rl-global').textContent = fmt(m.rate_limit.rejected_global);
+    el('rl-device').textContent = fmt(m.rate_limit.rejected_per_device);
+
+    // DNS
+    el('dns-udp').textContent = fmt(m.dns.udp_queries);
+    el('dns-tcp').textContent = fmt(m.dns.tcp_queries);
+    el('dns-dropped').textContent = fmt(m.dns.udp_dropped + m.dns.tcp_dropped);
+
+    // ACME
+    el('acme-created').textContent = fmt(m.acme.challenges_created);
+    el('acme-expired').textContent = fmt(m.acme.challenges_expired);
+    el('acme-dnsfail').textContent = fmt(m.acme.dns_set_failed);
+
+    // Census
+    el('census-runs').textContent = fmt(m.census.runs_completed);
+    el('census-failed').textContent = fmt(m.census.runs_failed);
+    if (m.census.last_completed_unix > 0) {
+      el('census-last').textContent = fmtTime(new Date(m.census.last_completed_unix * 1000));
+    }
+    el('census-duration').textContent = m.census.last_duration_ms || '-';
+
+    // Fleet
+    if (fleet) {
+      el('fleet-devices').textContent = fmt(fleet.devices?.total);
+      el('fleet-accounts').textContent = fmt(fleet.accounts?.total);
+      el('fleet-recovery').textContent = fleet.accounts?.pending_recovery ? fleet.accounts.pending_recovery + ' recovering' : '';
+      el('fleet-nexus').textContent = fmt(fleet.nexus?.active);
+      el('fleet-issuers').textContent = fmt(fleet.issuers?.total);
+      el('fleet-flagged').textContent = fleet.issuers?.flagged ? fleet.issuers.flagged + ' flagged' : '';
+
+      const trustColors = {strong:'color-strong',standard:'color-standard',provisional:'color-provisional',suspicious:'color-suspicious',quarantine:'color-quarantine',software:'color-software'};
+      const classColors = {verified:'color-verified',crowd_corroborated:'color-crowd',unverified_hw:'color-unverified',software:'color-software'};
+      renderBars('trust-bars', fleet.devices?.by_trust_level, trustColors, fleet.devices?.total || 1);
+      renderBars('class-bars', fleet.devices?.by_identity_class, classColors, fleet.devices?.total || 1);
+    }
+
+    prevMetrics = m;
+  } catch (e) {
+    el('conn-status').textContent = 'error';
+  }
+}
+
+async function loadAudit(append) {
+  try {
+    el('audit-error').style.display = 'none';
+    let url = '/audit?limit=30';
+    const action = el('audit-action').value;
+    const actor = el('audit-actor').value;
+    if (action) url += '&action=' + encodeURIComponent(action);
+    if (actor) url += '&actor_type=' + encodeURIComponent(actor);
+    if (append && auditCursor) url += '&before=' + auditCursor;
+
+    const data = await fetchJSON(url);
+    const body = el('audit-body');
+    if (!append) body.innerHTML = '';
+
+    for (const e of (data.entries || [])) {
+      const tr = document.createElement('tr');
+      const details = e.details ? JSON.stringify(e.details) : '';
+      const shortDetails = details.length > 60 ? details.substring(0, 60) + '...' : details;
+      const resource = (e.resource_type || '') + (e.resource_id ? ':' + e.resource_id.substring(0,8) : '');
+      tr.innerHTML = '<td>' + esc(fmtTime(e.timestamp)) + '</td><td>' + esc(e.action) + '</td><td>' + esc(e.actor_type) +
+        '</td><td>' + esc(resource) +
+        '</td><td title="' + esc(details) + '">' + esc(shortDetails) + '</td>';
+      body.appendChild(tr);
+      auditCursor = e.id;
+    }
+
+    el('audit-more').style.display = data.has_more ? '' : 'none';
+  } catch (e) {
+    el('audit-error').textContent = 'Failed to load audit log';
+    el('audit-error').style.display = '';
+  }
+}
+
+function loadAuditMore() { loadAudit(true); }
+
+// Initial load
+refresh();
+loadAudit();
+setInterval(refresh, 10000);
+</script>
+</body>
+</html>

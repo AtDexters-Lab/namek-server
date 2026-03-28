@@ -9,6 +9,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/AtDexters-Lab/namek-server/internal/metrics"
 )
 
 const (
@@ -54,10 +56,17 @@ func NewNonceStore(logger *slog.Logger, maxNonces int, ttl time.Duration) *Nonce
 	return s
 }
 
+// Count returns the current number of nonces in the store.
+func (s *NonceStore) Count() int64 { return s.count.Load() }
+
+// MaxNonces returns the configured capacity limit.
+func (s *NonceStore) MaxNonces() int { return s.maxNonces }
+
 // Generate creates a new nonce and returns it as a base64-encoded string.
 func (s *NonceStore) Generate() (string, time.Time, error) {
 	// Optimistic capacity check (soft limit — may overshoot by up to nonceNumShards)
 	if s.count.Load() >= int64(s.maxNonces) {
+		metrics.Get().Nonce.CapacityRejected.Add(1)
 		return "", time.Time{}, ErrNonceCapacity
 	}
 
@@ -85,6 +94,7 @@ func (s *NonceStore) Generate() (string, time.Time, error) {
 func (s *NonceStore) Consume(nonce string) error {
 	raw, err := base64.RawURLEncoding.DecodeString(nonce)
 	if err != nil || len(raw) < 1 {
+		metrics.Get().Nonce.ConsumeNotFound.Add(1)
 		return ErrNonceNotFound
 	}
 
@@ -95,6 +105,7 @@ func (s *NonceStore) Consume(nonce string) error {
 	entry, ok := sh.entries[nonce]
 	if !ok {
 		sh.mu.Unlock()
+		metrics.Get().Nonce.ConsumeNotFound.Add(1)
 		return ErrNonceNotFound
 	}
 	delete(sh.entries, nonce)
@@ -103,6 +114,7 @@ func (s *NonceStore) Consume(nonce string) error {
 	s.count.Add(-1)
 
 	if time.Now().After(entry.expiresAt) {
+		metrics.Get().Nonce.ConsumeNotFound.Add(1)
 		return ErrNonceNotFound
 	}
 	return nil

@@ -13,6 +13,7 @@ import (
 
 	"github.com/AtDexters-Lab/namek-server/internal/config"
 	"github.com/AtDexters-Lab/namek-server/internal/identity"
+	"github.com/AtDexters-Lab/namek-server/internal/metrics"
 	"github.com/AtDexters-Lab/namek-server/internal/model"
 	"github.com/AtDexters-Lab/namek-server/internal/store"
 	"github.com/AtDexters-Lab/namek-server/internal/tpm"
@@ -201,6 +202,7 @@ func (s *RecoveryService) ProcessRecoveryBundle(ctx context.Context, deviceID uu
 	s.auditStore.LogAction(ctx, model.ActorTypeDevice, deviceID.String(),
 		"recovery.claim_submitted", "account", strPtr(bundle.AccountID),
 		map[string]string{"voucher_count": fmt.Sprintf("%d", storedCount)}, nil)
+	metrics.Get().Recovery.ClaimsSubmitted.Add(1)
 
 	// 6. Evaluate quorum
 	if _, err := s.EvaluateQuorum(ctx, claimedAccountID); err != nil {
@@ -330,6 +332,7 @@ func (s *RecoveryService) EvaluateQuorum(ctx context.Context, accountID uuid.UUI
 				"device_count":     fmt.Sprintf("%d", enrolledCount),
 				"quorum_threshold": fmt.Sprintf("%d", quorumNeeded),
 			}, nil)
+		metrics.Get().Recovery.QuorumReached.Add(1)
 
 		s.auditStore.LogAction(ctx, model.ActorTypeSystem, "system",
 			"recovery.account_promoted", "account", strPtr(accountID.String()), nil, nil)
@@ -429,6 +432,7 @@ func (s *RecoveryService) DissolveAccount(ctx context.Context, accountID uuid.UU
 	s.auditStore.LogAction(ctx, model.ActorTypeSystem, "system",
 		"recovery.account_dissolved", "account", strPtr(accountID.String()),
 		map[string]string{"reason": "quorum_timeout", "device_count": fmt.Sprintf("%d", len(devices))}, nil)
+	metrics.Get().Recovery.AccountsDissolved.Add(1)
 }
 
 // CleanupLoop periodically cleans up old recovery claims.

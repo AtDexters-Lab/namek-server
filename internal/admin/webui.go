@@ -12,8 +12,10 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/AtDexters-Lab/namek-server/internal/api/handler"
+	"github.com/AtDexters-Lab/namek-server/internal/auth"
 	"github.com/AtDexters-Lab/namek-server/internal/service"
 	"github.com/AtDexters-Lab/namek-server/internal/store"
 )
@@ -25,6 +27,9 @@ import (
 //go:embed index.html
 var indexHTML []byte
 
+//go:embed dashboard.html
+var dashboardHTML []byte
+
 // OperatorDeps holds dependencies for operator API endpoints on the admin server.
 type OperatorDeps struct {
 	CensusStore   *store.CensusStore
@@ -34,6 +39,14 @@ type OperatorDeps struct {
 	AccountStore  *store.AccountStore
 	CensusSvc     *service.CensusService
 	RecoverySvc   *service.RecoveryService
+
+	// Observability dashboard deps
+	NexusStore             *store.NexusStore
+	Pool                   *pgxpool.Pool
+	NonceStore             *auth.NonceStore
+	PendingCounter         PendingCounter
+	CensusAnalysisInterval time.Duration
+	MaxPendingEnrollments  int
 }
 
 // NewHandler returns an http.Handler that serves the powerdns-webui at /,
@@ -48,15 +61,22 @@ func NewHandler(pdnsAPIURL, pdnsAPIKey string, adminAddr string, logger *slog.Lo
 
 	mux := http.NewServeMux()
 
-	// Serve embedded powerdns-webui at root
-	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Header().Set("Content-Length", strconv.Itoa(len(indexHTML)))
-		w.Header().Set("Cache-Control", "no-cache")
-		w.Header().Set("X-Content-Type-Options", "nosniff")
-		w.Header().Set("X-Frame-Options", "DENY")
-		w.Write(indexHTML)
-	})
+	serveHTML := func(content []byte) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.Header().Set("Content-Length", strconv.Itoa(len(content)))
+			w.Header().Set("Cache-Control", "no-cache")
+			w.Header().Set("X-Content-Type-Options", "nosniff")
+			w.Header().Set("X-Frame-Options", "DENY")
+			w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'")
+			w.Write(content)
+		}
+	}
+
+	mux.HandleFunc("GET /{$}", serveHTML(indexHTML))
+	if operatorDeps != nil {
+		mux.HandleFunc("GET /dashboard", serveHTML(dashboardHTML))
+	}
 
 	// Return 204 for favicon to avoid proxy noise
 	mux.HandleFunc("GET /favicon.ico", func(w http.ResponseWriter, r *http.Request) {
@@ -108,9 +128,16 @@ func NewHandler(pdnsAPIURL, pdnsAPIKey string, adminAddr string, logger *slog.Lo
 
 		censusH := handler.NewCensusHandler(operatorDeps.CensusStore, operatorDeps.DeviceStore, operatorDeps.AuditStore, operatorDeps.CensusSvc, logger)
 		recoveryH := handler.NewRecoveryHandler(operatorDeps.RecoverySvc, operatorDeps.RecoveryStore, operatorDeps.AccountStore, operatorDeps.AuditStore, logger)
+		obsH := newObservabilityHandler(operatorDeps, logger)
 
 		op := g.Group("/operator/v1")
 		{
+			// Observability
+			op.GET("/system/health", obsH.SystemHealth)
+			op.GET("/system/metrics", obsH.Metrics)
+			op.GET("/fleet/summary", obsH.FleetSummary)
+			op.GET("/audit", obsH.AuditLog)
+
 			// Census
 			op.GET("/census/issuers", censusH.ListIssuers)
 			op.GET("/census/issuers/:fingerprint", censusH.GetIssuer)
@@ -188,7 +215,10 @@ func withLogging(next http.Handler, logger *slog.Logger) http.Handler {
 		start := time.Now()
 		next.ServeHTTP(rec, r)
 		path := r.URL.Path
-		if path == "/health" || path == "/favicon.ico" {
+		if path == "/health" || path == "/favicon.ico" ||
+			path == "/operator/v1/system/health" ||
+			path == "/operator/v1/system/metrics" ||
+			path == "/operator/v1/fleet/summary" {
 			return
 		}
 		logger.Info("admin request",
