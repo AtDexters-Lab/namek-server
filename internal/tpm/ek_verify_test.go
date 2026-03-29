@@ -2,6 +2,8 @@ package tpm
 
 import (
 	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
@@ -381,5 +383,120 @@ func TestEKFingerprint_Normalized(t *testing.T) {
 	// Sanity: fingerprint is 64 hex chars (SHA-256)
 	if len(clean) != 64 {
 		t.Errorf("unexpected fingerprint length: %d", len(clean))
+	}
+}
+
+func TestEKFingerprint_UnifiedWithPubFingerprint(t *testing.T) {
+	// EKFingerprint (from cert) and EKPubFingerprint (from raw pubkey) must
+	// produce the same fingerprint for the same underlying EK public key.
+	certDER, key := buildSelfSignedCertDER(t)
+	v := &realVerifier{logger: noopLogger()}
+
+	// Fingerprint via cert
+	certFP := v.EKFingerprint(certDER)
+
+	// Fingerprint via raw PKIX public key
+	pkixDER, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
+	if err != nil {
+		t.Fatalf("marshal PKIX public key: %v", err)
+	}
+	pubFP := v.EKPubFingerprint(pkixDER)
+
+	if certFP != pubFP {
+		t.Errorf("fingerprints diverge for same key:\n  cert:   %s\n  pubkey: %s", certFP, pubFP)
+	}
+}
+
+func TestEKPubFingerprint_Deterministic(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	v := &realVerifier{logger: noopLogger()}
+
+	pkixDER, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	fp1 := v.EKPubFingerprint(pkixDER)
+	fp2 := v.EKPubFingerprint(pkixDER)
+
+	if fp1 != fp2 {
+		t.Error("fingerprint is not deterministic")
+	}
+	if len(fp1) != 64 {
+		t.Errorf("unexpected fingerprint length: %d", len(fp1))
+	}
+}
+
+func TestEKPubFingerprint_ECCKeyProducesDifferentFingerprint(t *testing.T) {
+	// Verify that an ECC key produces a valid fingerprint (the rejection
+	// of non-RSA keys happens in the service layer, not the verifier).
+	ecKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate ECC key: %v", err)
+	}
+	v := &realVerifier{logger: noopLogger()}
+
+	pkixDER, err := x509.MarshalPKIXPublicKey(&ecKey.PublicKey)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	fp := v.EKPubFingerprint(pkixDER)
+	if len(fp) != 64 {
+		t.Errorf("unexpected fingerprint length: %d", len(fp))
+	}
+
+	// Should differ from an RSA key fingerprint
+	rsaKey, _ := rsa.GenerateKey(rand.Reader, 2048)
+	rsaPKIX, _ := x509.MarshalPKIXPublicKey(&rsaKey.PublicKey)
+	rsaFP := v.EKPubFingerprint(rsaPKIX)
+	if fp == rsaFP {
+		t.Error("ECC and RSA fingerprints should differ")
+	}
+}
+
+func TestParsePKIXPublicKey_ECCKeyType(t *testing.T) {
+	// Verify that x509.ParsePKIXPublicKey correctly identifies ECC keys,
+	// so the service layer's RSA type assertion will reject them.
+	ecKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate ECC key: %v", err)
+	}
+	pkixDER, err := x509.MarshalPKIXPublicKey(&ecKey.PublicKey)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	pubKey, err := x509.ParsePKIXPublicKey(pkixDER)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if _, ok := pubKey.(*rsa.PublicKey); ok {
+		t.Error("ECC key should not be parsed as RSA")
+	}
+}
+
+func TestParsePKIXPublicKey_SmallRSAKey(t *testing.T) {
+	// Verify that a 1024-bit RSA key is parseable but detectable by size.
+	key, err := rsa.GenerateKey(rand.Reader, 1024)
+	if err != nil {
+		t.Fatalf("generate 1024-bit key: %v", err)
+	}
+	pkixDER, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	pubKey, err := x509.ParsePKIXPublicKey(pkixDER)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	rsaKey, ok := pubKey.(*rsa.PublicKey)
+	if !ok {
+		t.Fatal("expected RSA key")
+	}
+	if rsaKey.N.BitLen() >= 2048 {
+		t.Errorf("expected <2048 bits, got %d", rsaKey.N.BitLen())
 	}
 }

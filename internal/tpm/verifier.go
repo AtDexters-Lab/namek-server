@@ -37,8 +37,16 @@ type Verifier interface {
 	// ExtractEKPublicKey extracts the public key from an EK certificate.
 	ExtractEKPublicKey(ekCertDER []byte) (crypto.PublicKey, error)
 
-	// EKFingerprint computes SHA-256 fingerprint of an EK certificate.
+	// EKFingerprint computes a SHA-256 fingerprint from an EK certificate.
+	// The fingerprint is derived from the PKIX DER-encoded public key extracted
+	// from the cert (not the cert DER itself), so it matches EKPubFingerprint
+	// for the same underlying EK.
 	EKFingerprint(ekCertDER []byte) string
+
+	// EKPubFingerprint computes a SHA-256 fingerprint from a PKIX DER-encoded
+	// EK public key. Used when no EK certificate is available (e.g. vTPMs).
+	// Produces the same fingerprint as EKFingerprint for the same EK.
+	EKPubFingerprint(ekPubDER []byte) string
 
 	// ParseEKCert parses a DER-encoded EK certificate.
 	ParseEKCert(ekCertDER []byte) (*x509.Certificate, error)

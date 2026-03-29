@@ -3,11 +3,13 @@ package tpmdevice
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 
@@ -70,7 +72,8 @@ type device struct {
 	ekHandle     tpmutil.Handle
 	akHandle     tpmutil.Handle
 	persistentEK bool // true if using persistent EK handle (don't flush)
-	ekCertDER    []byte
+	ekCertDER    []byte // nil when TPM has no EK cert in NVRAM
+	ekPubDER     []byte // PKIX DER-encoded EK public key (always set after init)
 	akPubRaw     []byte // TPMT_PUBLIC bytes
 	stateDir     string // if set, AK blobs are saved/loaded from this directory
 }
@@ -110,25 +113,47 @@ func Open(_ context.Context, addr string, opts ...OpenOption) (Device, error) {
 func (d *device) init() error {
 	// 1. Try to use the persistent EK handle (0x81010001) created by swtpm_setup.
 	// Fall back to creating a transient EK primary if it doesn't exist.
+	// In both cases, capture the EK public key for fingerprinting/enrollment.
+	var ekCryptoKey interface{}
 	const persistentEKHandle tpmutil.Handle = 0x81010001
-	_, _, _, err := tpm2.ReadPublic(d.rw, persistentEKHandle)
+	ekPub, _, _, err := tpm2.ReadPublic(d.rw, persistentEKHandle)
 	if err == nil {
 		d.ekHandle = persistentEKHandle
 		d.persistentEK = true
+		ekCryptoKey, err = ekPub.Key()
+		if err != nil {
+			return fmt.Errorf("extract ek public key from persistent handle: %w", err)
+		}
 	} else {
-		ekHandle, _, err := tpm2.CreatePrimary(d.rw, tpm2.HandleEndorsement, tpm2.PCRSelection{}, "", "", ekTemplate)
+		var ekHandle tpmutil.Handle
+		ekHandle, ekCryptoKey, err = tpm2.CreatePrimary(d.rw, tpm2.HandleEndorsement, tpm2.PCRSelection{}, "", "", ekTemplate)
 		if err != nil {
 			return fmt.Errorf("create ek primary: %w", err)
 		}
 		d.ekHandle = ekHandle
 	}
-
-	// 2. Read EK cert from NVRAM
-	ekCert, err := tpm2.NVReadEx(d.rw, tpmutil.Handle(ekCertNVIndex), tpm2.HandleOwner, "", 0)
+	d.ekPubDER, err = x509.MarshalPKIXPublicKey(ekCryptoKey)
 	if err != nil {
-		return fmt.Errorf("read ek cert from nvram (index 0x%x): %w", ekCertNVIndex, err)
+		return fmt.Errorf("marshal ek public key: %w", err)
 	}
-	d.ekCertDER = ekCert
+
+	// 2. Read EK cert from NVRAM (optional — vTPMs may not provision one).
+	// Probe the NV index first: if not defined, this is expected for vTPMs.
+	// If the index exists but the read fails, that's a real error.
+	// Note: NVReadPublic can only fail for "index not defined" at this point —
+	// we already proved TPM communication works via ReadPublic/CreatePrimary above.
+	// If a transient error does occur, the device enrolls without a cert (unverified)
+	// rather than failing to start. The error is logged for operator visibility.
+	if _, err := tpm2.NVReadPublic(d.rw, tpmutil.Handle(ekCertNVIndex)); err != nil {
+		slog.Warn("tpm: ek cert nv index not available, enrollment will use ek public key only",
+			"index", fmt.Sprintf("0x%x", ekCertNVIndex), "error", err)
+	} else {
+		ekCert, err := tpm2.NVReadEx(d.rw, tpmutil.Handle(ekCertNVIndex), tpm2.HandleOwner, "", 0)
+		if err != nil {
+			return fmt.Errorf("read ek cert from nvram (index 0x%x): %w", ekCertNVIndex, err)
+		}
+		d.ekCertDER = ekCert
+	}
 
 	// 3. Create SRK primary
 	srkHandle, _, err := tpm2.CreatePrimary(d.rw, tpm2.HandleOwner, tpm2.PCRSelection{}, "", "", srkTemplate)
@@ -224,10 +249,19 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 
 func (d *device) EKCertDER() ([]byte, error) {
 	if d.ekCertDER == nil {
-		return nil, fmt.Errorf("ek cert not available")
+		return nil, nil // no cert in NVRAM — not an error, use EKPublicDER() instead
 	}
 	out := make([]byte, len(d.ekCertDER))
 	copy(out, d.ekCertDER)
+	return out, nil
+}
+
+func (d *device) EKPublicDER() ([]byte, error) {
+	if d.ekPubDER == nil {
+		return nil, fmt.Errorf("ek public key not available")
+	}
+	out := make([]byte, len(d.ekPubDER))
+	copy(out, d.ekPubDER)
 	return out, nil
 }
 

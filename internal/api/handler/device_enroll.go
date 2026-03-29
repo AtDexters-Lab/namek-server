@@ -31,8 +31,17 @@ func NewDeviceEnrollHandler(deviceSvc *service.DeviceService, nexusSvc *service.
 	}
 }
 
+const (
+	// maxEKPubSize caps decoded ek_pub to prevent oversized payloads.
+	// RSA-2048 PKIX DER is ~294 bytes; RSA-4096 is ~550 bytes. 1024 is generous.
+	maxEKPubSize = 1024
+	// maxEKCertSize caps decoded ek_cert. A typical EK certificate is under 2KB.
+	maxEKCertSize = 4096
+)
+
 type enrollRequest struct {
-	EKCert   string `json:"ek_cert" binding:"required"`
+	EKCert   string `json:"ek_cert"`
+	EKPub    string `json:"ek_pub"`
 	AKParams string `json:"ak_params" binding:"required"`
 }
 
@@ -43,10 +52,38 @@ func (h *DeviceEnrollHandler) StartEnroll(c *gin.Context) {
 		return
 	}
 
-	ekCertDER, err := base64.StdEncoding.DecodeString(req.EKCert)
-	if err != nil {
-		httputil.RespondBadRequest(c, "invalid ek_cert encoding")
+	if req.EKCert == "" && req.EKPub == "" {
+		httputil.RespondBadRequest(c, "either ek_cert or ek_pub is required")
 		return
+	}
+
+	// When ek_cert is present, it takes precedence (richer metadata for trust classification).
+	var ekCertDER []byte
+	if req.EKCert != "" {
+		var err error
+		ekCertDER, err = base64.StdEncoding.DecodeString(req.EKCert)
+		if err != nil {
+			httputil.RespondBadRequest(c, "invalid ek_cert encoding")
+			return
+		}
+		if len(ekCertDER) > maxEKCertSize {
+			httputil.RespondBadRequest(c, "ek_cert too large")
+			return
+		}
+	}
+
+	var ekPubDER []byte
+	if req.EKPub != "" && ekCertDER == nil {
+		var err error
+		ekPubDER, err = base64.StdEncoding.DecodeString(req.EKPub)
+		if err != nil {
+			httputil.RespondBadRequest(c, "invalid ek_pub encoding")
+			return
+		}
+		if len(ekPubDER) > maxEKPubSize {
+			httputil.RespondBadRequest(c, "ek_pub too large")
+			return
+		}
 	}
 
 	akParams, err := base64.StdEncoding.DecodeString(req.AKParams)
@@ -57,11 +94,15 @@ func (h *DeviceEnrollHandler) StartEnroll(c *gin.Context) {
 
 	resp, err := h.deviceSvc.StartEnrollment(c.Request.Context(), service.EnrollRequest{
 		EKCertDER: ekCertDER,
+		EKPubDER:  ekPubDER,
 		AKParams:  akParams,
 		ClientIP:  net.ParseIP(c.ClientIP()),
 	}, h.tpmVerifier)
 	if err != nil {
+		var valErr *service.ErrValidation
 		switch {
+		case errors.As(err, &valErr):
+			httputil.RespondBadRequest(c, valErr.Message)
 		case errors.Is(err, service.ErrEnrollmentCapacity):
 			httputil.RespondServiceUnavailable(c, "enrollment capacity reached")
 		case errors.Is(err, service.ErrDeviceAlreadyExists):

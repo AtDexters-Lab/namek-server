@@ -184,18 +184,25 @@ type enrollPhase1Result struct {
 // enrollPhase1 performs the shared first phase of enrollment:
 // EK/AK retrieval, start enroll POST, credential activation, and quote generation.
 func (c *Client) enrollPhase1(ctx context.Context) (*enrollPhase1Result, error) {
-	ekCert, err := c.tpm.EKCertDER()
-	if err != nil {
-		return nil, fmt.Errorf("get ek cert: %w", err)
-	}
 	akPub, err := c.tpm.AKPublic()
 	if err != nil {
 		return nil, fmt.Errorf("get ak public: %w", err)
 	}
 
+	// Try EK cert first (richer metadata for trust classification).
+	// Fall back to EK public key for TPMs without NVRAM-provisioned certs.
 	enrollBody := map[string]string{
-		"ek_cert":   base64.StdEncoding.EncodeToString(ekCert),
 		"ak_params": base64.StdEncoding.EncodeToString(akPub),
+	}
+	ekCert, _ := c.tpm.EKCertDER()
+	if ekCert != nil {
+		enrollBody["ek_cert"] = base64.StdEncoding.EncodeToString(ekCert)
+	} else {
+		ekPub, err := c.tpm.EKPublicDER()
+		if err != nil {
+			return nil, fmt.Errorf("get ek identity: no cert or public key available: %w", err)
+		}
+		enrollBody["ek_pub"] = base64.StdEncoding.EncodeToString(ekPub)
 	}
 	var startResp enrollStartResponse
 	if err := c.doJSON(ctx, http.MethodPost, "/api/v1/devices/enroll", enrollBody, &startResp); err != nil {

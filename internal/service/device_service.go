@@ -4,7 +4,9 @@ import (
 	"context"
 	"crypto"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/subtle"
+	"crypto/x509"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -132,7 +134,8 @@ func (s *DeviceService) SetRecoveryProcessor(rp RecoveryProcessor) {
 }
 
 type EnrollRequest struct {
-	EKCertDER []byte
+	EKCertDER []byte // optional: DER-encoded EK certificate
+	EKPubDER  []byte // optional: PKIX DER-encoded EK public key (fallback when no cert)
 	AKParams  []byte
 	ClientIP  net.IP
 }
@@ -143,13 +146,47 @@ type EnrollResponse struct {
 }
 
 func (s *DeviceService) StartEnrollment(ctx context.Context, req EnrollRequest, verifier tpm.Verifier) (*EnrollResponse, error) {
-	// Verify EK cert and classify
-	ekResult, err := verifier.VerifyEKCert(req.EKCertDER)
-	if err != nil {
-		return nil, fmt.Errorf("ek verification failed: %w", err)
-	}
+	// Resolve EK identity: cert path (richer metadata) or pubkey-only path.
+	var ekPubKey crypto.PublicKey
+	var ekFingerprint string
+	var identityClass string
+	var ekVerifyResult *tpm.EKVerifyResult
 
-	ekFingerprint := verifier.EKFingerprint(req.EKCertDER)
+	if len(req.EKCertDER) > 0 {
+		// Cert path: verify against trusted CAs, extract pubkey and issuer metadata.
+		ekResult, err := verifier.VerifyEKCert(req.EKCertDER)
+		if err != nil {
+			return nil, fmt.Errorf("ek verification failed: %w", err)
+		}
+		ekPubKey = ekResult.EKPubKey
+		// Compute fingerprint from the already-extracted public key to avoid
+		// re-parsing the cert. Uses the same PKIX DER hash as the pubkey-only path.
+		pkixDER, err := x509.MarshalPKIXPublicKey(ekResult.EKPubKey)
+		if err != nil {
+			return nil, fmt.Errorf("marshal ek public key for fingerprint: %w", err)
+		}
+		ekFingerprint = verifier.EKPubFingerprint(pkixDER)
+		identityClass = ekResult.IdentityClass
+		ekVerifyResult = ekResult
+	} else {
+		// Pubkey-only path: no cert to verify, classify as unverified.
+		pubKey, err := x509.ParsePKIXPublicKey(req.EKPubDER)
+		if err != nil {
+			s.logger.Warn("invalid ek public key", "error", err)
+			return nil, &ErrValidation{Message: "invalid ek public key"}
+		}
+		rsaKey, ok := pubKey.(*rsa.PublicKey)
+		if !ok {
+			return nil, &ErrValidation{Message: "ek public key must be RSA"}
+		}
+		if rsaKey.N.BitLen() < 2048 {
+			return nil, &ErrValidation{Message: "ek public key must be at least 2048 bits"}
+		}
+		ekPubKey = pubKey
+		ekFingerprint = verifier.EKPubFingerprint(req.EKPubDER)
+		identityClass = tpm.IdentityClassUnverified
+		// ekVerifyResult stays nil — gates out census recording downstream
+	}
 
 	// Check for existing device with this EK.
 	// Active devices can re-enroll (new AK replaces old); suspended/revoked are blocked.
@@ -177,8 +214,8 @@ func (s *DeviceService) StartEnrollment(ctx context.Context, req EnrollRequest, 
 		return nil, fmt.Errorf("generate challenge secret: %w", err)
 	}
 
-	// Make credential (encrypt secret for the TPM)
-	encCredential, err := verifier.MakeCredential(ekResult.EKPubKey, akName, secret)
+	// Make credential (encrypt secret for the TPM — only needs the EK public key)
+	encCredential, err := verifier.MakeCredential(ekPubKey, akName, secret)
 	if err != nil {
 		return nil, fmt.Errorf("make credential: %w", err)
 	}
@@ -207,14 +244,14 @@ func (s *DeviceService) StartEnrollment(ctx context.Context, req EnrollRequest, 
 	}
 
 	pe := &PendingEnrollment{
-		EKPubKey:         ekResult.EKPubKey,
-		EKCertDER:        req.EKCertDER,
+		EKPubKey:         ekPubKey,
+		EKCertDER:        req.EKCertDER, // nil for pubkey-only enrollments
 		AKPubKeyDER:      akPubKeyDER,
 		AKName:           akName,
 		ChallengeSecret:  secret,
-		IdentityClass:    ekResult.IdentityClass,
+		IdentityClass:    identityClass,
 		EKFingerprint:    ekFingerprint,
-		EKVerifyResult:   ekResult,
+		EKVerifyResult:   ekVerifyResult, // nil for pubkey-only enrollments
 		ClientIP:         req.ClientIP,
 		ExpiresAt:        time.Now().Add(s.cfg.PendingEnrollmentTTL()),
 		ExistingDeviceID: existingDeviceID,
@@ -225,7 +262,8 @@ func (s *DeviceService) StartEnrollment(ctx context.Context, req EnrollRequest, 
 
 	s.logger.Info("enrollment started",
 		"ek_fingerprint", ekFingerprint,
-		"identity_class", ekResult.IdentityClass,
+		"identity_class", identityClass,
+		"has_cert", len(req.EKCertDER) > 0,
 		"client_ip", req.ClientIP,
 	)
 

@@ -4,7 +4,13 @@ package tpmdevice
 // Callers manage the TPM lifecycle externally; Device only holds the connection.
 type Device interface {
 	// EKCertDER returns the DER-encoded EK certificate from TPM NVRAM.
+	// Returns (nil, nil) when the TPM has no EK certificate provisioned
+	// (e.g. VirtualBox vTPM). Callers should fall back to EKPublicDER().
 	EKCertDER() ([]byte, error)
+
+	// EKPublicDER returns the PKIX DER-encoded EK public key.
+	// Always available regardless of whether the TPM has an EK certificate.
+	EKPublicDER() ([]byte, error)
 
 	// AKPublic returns the raw TPMT_PUBLIC bytes from CreateKey.
 	// Server's ParseAKPublic calls tpm2legacy.DecodePublic() which expects this format.

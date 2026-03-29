@@ -377,11 +377,17 @@ components:
 
     EnrollRequest:
       type: object
-      required: [ek_cert, ak_params]
+      required: [ak_params]
+      description: >
+        At least one of ek_cert or ek_pub must be provided.
+        When both are present, ek_cert takes precedence (richer metadata for trust classification).
       properties:
         ek_cert:
           type: string
-          description: Base64-encoded DER EK certificate
+          description: Base64-encoded DER EK certificate (preferred when available)
+        ek_pub:
+          type: string
+          description: Base64-encoded PKIX DER EK public key (fallback for TPMs without NVRAM certs)
         ak_params:
           type: string
           description: Base64-encoded AK public parameters

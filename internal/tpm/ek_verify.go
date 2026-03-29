@@ -367,11 +367,36 @@ func (v *realVerifier) ExtractEKPublicKey(ekCertDER []byte) (crypto.PublicKey, e
 	return cert.PublicKey, nil
 }
 
-// EKFingerprint normalizes the DER bytes (stripping trailing data) before
-// hashing so the fingerprint is stable regardless of TPM-appended padding.
+// EKFingerprint extracts the public key from the EK certificate and computes
+// sha256(PKIX DER of public key). This produces the same fingerprint as
+// EKPubFingerprint for the same underlying EK, ensuring identity consistency
+// regardless of whether the device enrolls with cert or pubkey.
 func (v *realVerifier) EKFingerprint(ekCertDER []byte) string {
-	normalized, _ := trimDERTrailingData(ekCertDER)
-	h := sha256.Sum256(normalized)
+	cert, err := v.parseEKCertLenient(ekCertDER)
+	if err != nil {
+		// Fallback: hash normalized cert DER. This breaks fingerprint unification
+		// with EKPubFingerprint, so log at error level for operator visibility.
+		v.logger.Error("EKFingerprint: cert parse failed, falling back to cert DER hash (fingerprint will not match pubkey path)", "error", err)
+		normalized, _ := trimDERTrailingData(ekCertDER)
+		h := sha256.Sum256(normalized)
+		return hex.EncodeToString(h[:])
+	}
+	pkixDER, err := x509.MarshalPKIXPublicKey(cert.PublicKey)
+	if err != nil {
+		v.logger.Error("EKFingerprint: PKIX marshal failed, falling back to cert DER hash (fingerprint will not match pubkey path)", "error", err)
+		normalized, _ := trimDERTrailingData(ekCertDER)
+		h := sha256.Sum256(normalized)
+		return hex.EncodeToString(h[:])
+	}
+	h := sha256.Sum256(pkixDER)
+	return hex.EncodeToString(h[:])
+}
+
+// EKPubFingerprint computes sha256(PKIX DER of EK public key).
+// Used when no EK certificate is available. Produces the same fingerprint
+// as EKFingerprint for the same underlying EK.
+func (v *realVerifier) EKPubFingerprint(ekPubDER []byte) string {
+	h := sha256.Sum256(ekPubDER)
 	return hex.EncodeToString(h[:])
 }
 
