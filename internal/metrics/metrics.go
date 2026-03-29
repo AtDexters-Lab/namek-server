@@ -74,6 +74,8 @@ type ACMEMetrics struct {
 	ChallengesDeleted atomic.Int64
 	ChallengesExpired atomic.Int64
 	DNSSetFailed      atomic.Int64
+	VerifyOK          atomic.Int64
+	VerifyFailed      atomic.Int64
 }
 
 type LastSeenMetrics struct {
@@ -134,6 +136,8 @@ func (c *Collector) Snapshot() Snapshot {
 			ChallengesDeleted: c.ACME.ChallengesDeleted.Load(),
 			ChallengesExpired: c.ACME.ChallengesExpired.Load(),
 			DNSSetFailed:      c.ACME.DNSSetFailed.Load(),
+			VerifyOK:          c.ACME.VerifyOK.Load(),
+			VerifyFailed:      c.ACME.VerifyFailed.Load(),
 		},
 		LastSeen: LastSeenSnapshot{
 			FlushSuccess:   c.LastSeen.FlushSuccess.Load(),
@@ -212,6 +216,8 @@ type ACMESnapshot struct {
 	ChallengesDeleted int64 `json:"challenges_deleted"`
 	ChallengesExpired int64 `json:"challenges_expired"`
 	DNSSetFailed      int64 `json:"dns_set_failed"`
+	VerifyOK          int64 `json:"verify_ok"`
+	VerifyFailed      int64 `json:"verify_failed"`
 }
 
 type LastSeenSnapshot struct {

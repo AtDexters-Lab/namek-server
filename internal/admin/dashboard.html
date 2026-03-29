@@ -151,6 +151,8 @@ tr:hover td{background:#1c2128}
 <div class="metric"><span class="label">Created</span><span class="value" id="acme-created">-</span></div>
 <div class="metric"><span class="label">Expired</span><span class="value" id="acme-expired">-</span></div>
 <div class="metric"><span class="label">DNS Fail</span><span class="value" id="acme-dnsfail">-</span></div>
+<div class="metric"><span class="label">Verify OK</span><span class="value" id="acme-verifyok">-</span></div>
+<div class="metric"><span class="label">Verify Fail</span><span class="value" id="acme-verifyfail">-</span></div>
 </div>
 </div>
 </div>
@@ -330,6 +332,8 @@ async function refresh() {
     el('acme-created').textContent = fmt(m.acme.challenges_created);
     el('acme-expired').textContent = fmt(m.acme.challenges_expired);
     el('acme-dnsfail').textContent = fmt(m.acme.dns_set_failed);
+    el('acme-verifyok').textContent = fmt(m.acme.verify_ok);
+    el('acme-verifyfail').textContent = fmt(m.acme.verify_failed);
 
     // Census
     el('census-runs').textContent = fmt(m.census.runs_completed);

@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"regexp"
@@ -25,15 +26,17 @@ type ACMEService struct {
 	acmeStore   *store.ACMEStore
 	deviceStore *store.DeviceStore
 	pdns        *dns.PowerDNSClient
+	txtVerifier *dns.TXTVerifier
 	cfg         *config.Config
 	logger      *slog.Logger
 }
 
-func NewACMEService(acmeStore *store.ACMEStore, deviceStore *store.DeviceStore, pdns *dns.PowerDNSClient, cfg *config.Config, logger *slog.Logger) *ACMEService {
+func NewACMEService(acmeStore *store.ACMEStore, deviceStore *store.DeviceStore, pdns *dns.PowerDNSClient, txtVerifier *dns.TXTVerifier, cfg *config.Config, logger *slog.Logger) *ACMEService {
 	return &ACMEService{
 		acmeStore:   acmeStore,
 		deviceStore: deviceStore,
 		pdns:        pdns,
+		txtVerifier: txtVerifier,
 		cfg:         cfg,
 		logger:      logger,
 	}
@@ -110,6 +113,31 @@ func (s *ACMEService) CreateChallenge(ctx context.Context, req CreateChallengeRe
 		}
 		metrics.Get().ACME.DNSSetFailed.Add(1)
 		return nil, fmt.Errorf("set dns txt record: %w", err)
+	}
+
+	// Write-back verification: confirm the DNS listener serves the correct record.
+	if verifyErr := s.txtVerifier.VerifyTXT(ctx, fqdn, req.Digest); verifyErr != nil {
+		if ctx.Err() != nil {
+			s.logger.Debug("acme txt verification skipped: context cancelled", "fqdn", fqdn)
+		} else {
+			var mismatch *dns.ErrTXTMismatch
+			if errors.As(verifyErr, &mismatch) {
+				s.logger.Error("acme txt write-back mismatch",
+					"fqdn", fqdn,
+					"expected", req.Digest,
+					"actual", mismatch.Actual,
+					"quoted_sent", fmt.Sprintf("%q", req.Digest),
+				)
+			} else {
+				s.logger.Warn("acme txt write-back verification failed",
+					"fqdn", fqdn,
+					"error", verifyErr,
+				)
+			}
+			metrics.Get().ACME.VerifyFailed.Add(1)
+		}
+	} else {
+		metrics.Get().ACME.VerifyOK.Add(1)
 	}
 
 	s.logger.Info("acme challenge created",

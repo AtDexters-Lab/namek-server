@@ -16,6 +16,7 @@ dns:
 powerDNS:
   apiURL: "http://localhost:8181"
   apiKey: "pdns-dev-key"
+  dnsAddress: "127.0.0.1:5354"
 
 tpm:
   allowSoftwareTPM: true
