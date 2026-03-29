@@ -234,14 +234,14 @@ var migrations = []string{
 	// Version 3: Consolidate identity classes — rename "unverified_hw" to "unverified",
 	// remove "software" (was incorrectly assigned to real hardware TPMs with unverifiable EK certs).
 	// Also remove "software" trust level (no longer produced by any code path).
-	`UPDATE devices SET identity_class = 'unverified' WHERE identity_class IN ('software', 'unverified_hw');
-	 UPDATE devices SET trust_level = 'provisional' WHERE trust_level = 'software' AND trust_level_override IS NULL;
-	 UPDATE devices SET trust_level_override = 'provisional' WHERE trust_level_override = 'software';
-	 ALTER TABLE devices DROP CONSTRAINT IF EXISTS devices_identity_class_check;
-	 ALTER TABLE devices ADD CONSTRAINT devices_identity_class_check CHECK (identity_class IN ('verified', 'crowd_corroborated', 'unverified'));
+	`ALTER TABLE devices DROP CONSTRAINT IF EXISTS devices_identity_class_check;
 	 ALTER TABLE devices DROP CONSTRAINT IF EXISTS devices_trust_level_check;
-	 ALTER TABLE devices ADD CONSTRAINT devices_trust_level_check CHECK (trust_level IN ('strong','standard','provisional','suspicious','quarantine'));
 	 ALTER TABLE devices DROP CONSTRAINT IF EXISTS devices_trust_level_override_check;
+	 UPDATE devices SET identity_class = 'unverified' WHERE identity_class IN ('software', 'unverified_hw');
+	 UPDATE devices SET trust_level = 'provisional' WHERE trust_level = 'software';
+	 UPDATE devices SET trust_level_override = 'provisional' WHERE trust_level_override = 'software';
+	 ALTER TABLE devices ADD CONSTRAINT devices_identity_class_check CHECK (identity_class IN ('verified', 'crowd_corroborated', 'unverified'));
+	 ALTER TABLE devices ADD CONSTRAINT devices_trust_level_check CHECK (trust_level IN ('strong','standard','provisional','suspicious','quarantine'));
 	 ALTER TABLE devices ADD CONSTRAINT devices_trust_level_override_check CHECK (trust_level_override IS NULL OR trust_level_override IN ('strong','standard','provisional','suspicious','quarantine'));`,
 }
 
