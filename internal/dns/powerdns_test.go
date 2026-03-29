@@ -96,6 +96,46 @@ func TestPowerDNSClient_SetTXTRecord(t *testing.T) {
 	}
 }
 
+func TestPowerDNSClient_SetTXTRecords_MultiValue(t *testing.T) {
+	var receivedBody patchBody
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&receivedBody)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	client := NewPowerDNSClient(config.PowerDNSConfig{
+		ApiURL:   server.URL,
+		ApiKey:   "test-key",
+		ServerID: "localhost",
+	}, testLogger())
+
+	err := client.SetTXTRecords(context.Background(), "test.com.", "_acme-challenge.uuid.test.com",
+		[]string{"digest-A", "digest-B"}, 300)
+	if err != nil {
+		t.Fatalf("set txt records: %v", err)
+	}
+
+	if len(receivedBody.RRSets) != 1 {
+		t.Fatalf("expected 1 rrset, got %d", len(receivedBody.RRSets))
+	}
+
+	rrset := receivedBody.RRSets[0]
+	if rrset.Type != "TXT" {
+		t.Errorf("type = %q, want TXT", rrset.Type)
+	}
+	if len(rrset.Records) != 2 {
+		t.Fatalf("expected 2 records, got %d", len(rrset.Records))
+	}
+	if rrset.Records[0].Content != `"digest-A"` {
+		t.Errorf("record[0] = %q, want %q", rrset.Records[0].Content, `"digest-A"`)
+	}
+	if rrset.Records[1].Content != `"digest-B"` {
+		t.Errorf("record[1] = %q, want %q", rrset.Records[1].Content, `"digest-B"`)
+	}
+}
+
 func TestPowerDNSClient_DeleteARecords(t *testing.T) {
 	var receivedBody patchBody
 

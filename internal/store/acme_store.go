@@ -27,8 +27,7 @@ func (s *ACMEStore) Create(ctx context.Context, c *model.ACMEChallenge) error {
 	err := s.pool.QueryRow(ctx, `
 		INSERT INTO acme_challenges (id, device_id, fqdn, key_authorization, expires_at)
 		VALUES ($1, $2, $3, $4, $5)
-		ON CONFLICT (device_id, fqdn) DO UPDATE SET
-			key_authorization = EXCLUDED.key_authorization,
+		ON CONFLICT (device_id, fqdn, key_authorization) DO UPDATE SET
 			expires_at = EXCLUDED.expires_at,
 			created_at = NOW()
 		RETURNING id
@@ -63,6 +62,28 @@ func (s *ACMEStore) Delete(ctx context.Context, id uuid.UUID) error {
 		return ErrChallengeNotFound
 	}
 	return nil
+}
+
+// GetActiveDigestsByFQDN returns all non-expired key_authorization values for a given FQDN.
+func (s *ACMEStore) GetActiveDigestsByFQDN(ctx context.Context, fqdn string) ([]string, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT key_authorization FROM acme_challenges
+		WHERE fqdn = $1 AND expires_at > NOW()
+	`, fqdn)
+	if err != nil {
+		return nil, fmt.Errorf("get active digests by fqdn: %w", err)
+	}
+	defer rows.Close()
+
+	var digests []string
+	for rows.Next() {
+		var d string
+		if err := rows.Scan(&d); err != nil {
+			return nil, fmt.Errorf("scan digest: %w", err)
+		}
+		digests = append(digests, d)
+	}
+	return digests, rows.Err()
 }
 
 func (s *ACMEStore) GetExpired(ctx context.Context) ([]*model.ACMEChallenge, error) {

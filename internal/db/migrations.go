@@ -8,7 +8,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const currentVersion = 3
+const currentVersion = 4
 
 var migrations = []string{
 	// Version 1: Consolidated schema (original + ACME certs + backend port + RFC 004 stateless resilience)
@@ -243,6 +243,11 @@ var migrations = []string{
 	 ALTER TABLE devices ADD CONSTRAINT devices_identity_class_check CHECK (identity_class IN ('verified', 'crowd_corroborated', 'unverified'));
 	 ALTER TABLE devices ADD CONSTRAINT devices_trust_level_check CHECK (trust_level IN ('strong','standard','provisional','suspicious','quarantine'));
 	 ALTER TABLE devices ADD CONSTRAINT devices_trust_level_override_check CHECK (trust_level_override IS NULL OR trust_level_override IN ('strong','standard','provisional','suspicious','quarantine'));`,
+
+	// Version 4: Allow multiple ACME challenges per (device, fqdn) with different digests.
+	// Required for multi-SAN certs where wildcard + base domain share the same _acme-challenge FQDN.
+	`ALTER TABLE acme_challenges DROP CONSTRAINT IF EXISTS acme_challenges_device_id_fqdn_key;
+	 CREATE UNIQUE INDEX acme_challenges_device_fqdn_digest ON acme_challenges(device_id, fqdn, key_authorization);`,
 }
 
 func Migrate(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger) error {

@@ -58,16 +58,30 @@ func (c *PowerDNSClient) DeleteARecords(ctx context.Context, zone, name string) 
 	return c.patchRRSets(ctx, zone, []RRSet{deleteRRSet(ensureDot(name), "A")})
 }
 
-// SetTXTRecord creates or replaces a TXT record.
-func (c *PowerDNSClient) SetTXTRecord(ctx context.Context, zone, name, value string, ttl int) error {
+// SetTXTRecords creates or replaces all TXT records for a name.
+// Each value becomes a separate record in the RRSet.
+// Use DeleteTXTRecord to remove all records; passing an empty values slice is an error.
+func (c *PowerDNSClient) SetTXTRecords(ctx context.Context, zone, name string, values []string, ttl int) error {
+	if len(values) == 0 {
+		return fmt.Errorf("SetTXTRecords requires at least one value")
+	}
+	records := make([]Record, len(values))
+	for i, v := range values {
+		records[i] = Record{Content: fmt.Sprintf("%q", v), Disabled: false}
+	}
 	rrset := RRSet{
 		Name:       ensureDot(name),
 		Type:       "TXT",
 		TTL:        ttl,
 		ChangeType: "REPLACE",
-		Records:    []Record{{Content: fmt.Sprintf("%q", value), Disabled: false}},
+		Records:    records,
 	}
 	return c.patchRRSets(ctx, zone, []RRSet{rrset})
+}
+
+// SetTXTRecord creates or replaces a single TXT record.
+func (c *PowerDNSClient) SetTXTRecord(ctx context.Context, zone, name, value string, ttl int) error {
+	return c.SetTXTRecords(ctx, zone, name, []string{value}, ttl)
 }
 
 // DeleteTXTRecord removes a TXT record.

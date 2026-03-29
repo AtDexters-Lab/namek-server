@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"log/slog"
 	"regexp"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -21,6 +23,7 @@ import (
 var printableASCIIRegex = regexp.MustCompile(`^[\x20-\x7E]+$`)
 
 const challengeTTL = 1 * time.Hour
+const fqdnLockStripes = 64
 
 type ACMEService struct {
 	acmeStore   *store.ACMEStore
@@ -29,6 +32,31 @@ type ACMEService struct {
 	txtVerifier *dns.TXTVerifier
 	cfg         *config.Config
 	logger      *slog.Logger
+	fqdnLocks   [fqdnLockStripes]sync.Mutex
+}
+
+// lockFQDN acquires a striped mutex for the given FQDN and returns an unlock function.
+// Serializes DB-mutate + DNS-write sequences to prevent concurrent operations on the
+// same FQDN from clobbering each other's TXT RRSets.
+func (s *ACMEService) lockFQDN(fqdn string) func() {
+	h := fnv.New32a()
+	h.Write([]byte(fqdn))
+	mu := &s.fqdnLocks[h.Sum32()%fqdnLockStripes]
+	mu.Lock()
+	return mu.Unlock
+}
+
+// syncTXTRecords rebuilds the TXT RRSet for an FQDN from all active challenges.
+// Must be called under lockFQDN.
+func (s *ACMEService) syncTXTRecords(ctx context.Context, fqdn string) error {
+	digests, err := s.acmeStore.GetActiveDigestsByFQDN(ctx, fqdn)
+	if err != nil {
+		return fmt.Errorf("get active digests: %w", err)
+	}
+	if len(digests) == 0 {
+		return s.pdns.DeleteTXTRecord(ctx, s.cfg.DNS.Zone, fqdn)
+	}
+	return s.pdns.SetTXTRecords(ctx, s.cfg.DNS.Zone, fqdn, digests, 300)
 }
 
 func NewACMEService(acmeStore *store.ACMEStore, deviceStore *store.DeviceStore, pdns *dns.PowerDNSClient, txtVerifier *dns.TXTVerifier, cfg *config.Config, logger *slog.Logger) *ACMEService {
@@ -89,14 +117,18 @@ func (s *ACMEService) CreateChallenge(ctx context.Context, req CreateChallengeRe
 		ExpiresAt:        time.Now().Add(challengeTTL),
 	}
 
-	// Create uses ON CONFLICT upsert — challenge.ID may change to an existing row's ID.
+	// Serialize DB + DNS operations for this FQDN to prevent concurrent
+	// multi-SAN challenges from clobbering each other's TXT RRSets.
+	unlock := s.lockFQDN(fqdn)
+
 	if err := s.acmeStore.Create(ctx, challenge); err != nil {
+		unlock()
 		return nil, fmt.Errorf("create challenge: %w", err)
 	}
 
-	// Set TXT record in PowerDNS
-	if err := s.pdns.SetTXTRecord(ctx, s.cfg.DNS.Zone, fqdn, req.Digest, 300); err != nil {
-		s.logger.Error("failed to set acme txt record",
+	// Rebuild the full TXT RRSet from all active challenges for this FQDN.
+	if err := s.syncTXTRecords(ctx, fqdn); err != nil {
+		s.logger.Error("failed to sync acme txt records",
 			"fqdn", fqdn,
 			"error", err,
 		)
@@ -111,11 +143,14 @@ func (s *ACMEService) CreateChallenge(ctx context.Context, req CreateChallengeRe
 				)
 			}
 		}
+		unlock()
 		metrics.Get().ACME.DNSSetFailed.Add(1)
-		return nil, fmt.Errorf("set dns txt record: %w", err)
+		return nil, fmt.Errorf("sync dns txt records: %w", err)
 	}
 
-	// Write-back verification: confirm the DNS listener serves the correct record.
+	unlock()
+
+	// Write-back verification (outside lock — read-only, no race concern).
 	if verifyErr := s.txtVerifier.VerifyTXT(ctx, fqdn, req.Digest); verifyErr != nil {
 		if ctx.Err() != nil {
 			s.logger.Debug("acme txt verification skipped: context cancelled", "fqdn", fqdn)
@@ -163,18 +198,22 @@ func (s *ACMEService) DeleteChallenge(ctx context.Context, challengeID uuid.UUID
 		return store.ErrChallengeNotFound
 	}
 
-	// Delete TXT record from PowerDNS
-	if err := s.pdns.DeleteTXTRecord(ctx, s.cfg.DNS.Zone, challenge.FQDN); err != nil {
-		s.logger.Error("failed to delete acme txt record",
-			"fqdn", challenge.FQDN,
-			"error", err,
-		)
-		// Continue to delete from DB even if DNS cleanup fails
-	}
+	unlock := s.lockFQDN(challenge.FQDN)
+	defer unlock()
 
 	if err := s.acmeStore.Delete(ctx, challengeID); err != nil {
 		return err
 	}
+
+	// Rebuild TXT RRSet with remaining digests, or delete if none remain.
+	if err := s.syncTXTRecords(ctx, challenge.FQDN); err != nil {
+		s.logger.Warn("failed to sync acme txt records after delete",
+			"fqdn", challenge.FQDN,
+			"error", err,
+		)
+		// Stale extra digest in DNS is benign — CA only checks expected digest is present.
+	}
+
 	metrics.Get().ACME.ChallengesDeleted.Add(1)
 	return nil
 }
@@ -206,29 +245,36 @@ func (s *ACMEService) cleanup(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		// Delete DNS first so a transient DNS failure preserves the DB row for retry.
-		// If DNS succeeds but DB delete below fails, the next cycle will re-attempt
-		// the DNS delete (idempotent in PowerDNS) then retry the DB delete.
-		if err := s.pdns.DeleteTXTRecord(ctx, s.cfg.DNS.Zone, c.FQDN); err != nil {
-			s.logger.Error("failed to cleanup acme txt record, will retry next cycle",
-				"fqdn", c.FQDN,
-				"error", err,
-			)
-			continue
+		if s.cleanupOne(ctx, c) {
+			cleaned++
 		}
-
-		if err := s.acmeStore.Delete(ctx, c.ID); err != nil {
-			s.logger.Error("failed to delete expired acme challenge from db",
-				"challenge_id", c.ID,
-				"error", err,
-			)
-			continue
-		}
-		metrics.Get().ACME.ChallengesExpired.Add(1)
-		cleaned++
 	}
 
 	if cleaned > 0 {
 		s.logger.Info("cleaned up expired acme challenges", "count", cleaned)
 	}
+}
+
+func (s *ACMEService) cleanupOne(ctx context.Context, c *model.ACMEChallenge) bool {
+	unlock := s.lockFQDN(c.FQDN)
+	defer unlock()
+
+	if err := s.acmeStore.Delete(ctx, c.ID); err != nil {
+		s.logger.Error("failed to delete expired acme challenge from db",
+			"challenge_id", c.ID,
+			"error", err,
+		)
+		return false
+	}
+
+	// Rebuild TXT RRSet with remaining non-expired digests, or delete if none.
+	if err := s.syncTXTRecords(ctx, c.FQDN); err != nil {
+		s.logger.Warn("failed to sync acme txt records during cleanup, will self-heal on next operation",
+			"fqdn", c.FQDN,
+			"error", err,
+		)
+	}
+
+	metrics.Get().ACME.ChallengesExpired.Add(1)
+	return true
 }
