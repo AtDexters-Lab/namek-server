@@ -16,12 +16,14 @@ type Device interface {
 	ActivateCredential(encCredential []byte) ([]byte, error)
 
 	// Quote generates a TPM quote signed by the AK.
+	// nonce is passed directly to the TPM as qualifyingData — callers must
+	// decode any transport encoding (hex, base64) before calling.
+	// Max 32 bytes to fit TPM2B_DATA on SHA-256-only TPMs.
 	// Returns base64-encoded wire format: uint32(quoteLen) || TPMS_ATTEST || TPMT_SIGNATURE
-	Quote(nonce string) (string, error)
+	Quote(nonce []byte) (string, error)
 
 	// QuoteOverData generates a TPM quote using sha256(data) as the nonce.
 	// Used for voucher signing where the "nonce" is a deterministic hash of the payload.
-	// The nonce passed to the TPM is hex.EncodeToString(sha256.Sum256(data)).
 	QuoteOverData(data []byte) (string, error)
 
 	// Close releases TPM handles (EK, AK) and closes the connection.

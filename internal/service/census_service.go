@@ -192,7 +192,7 @@ func (s *CensusService) reEvaluateIssuerTiers(ctx context.Context) error {
 			UPDATE devices SET identity_class = $1
 			WHERE issuer_fingerprint = $2 AND identity_class = $3
 		`, tpm.IdentityClassCrowdCorroborated,
-			issuer.IssuerFingerprint, tpm.IdentityClassUnverifiedHW)
+			issuer.IssuerFingerprint, tpm.IdentityClassUnverified)
 		if err != nil {
 			s.logger.Error("cascade identity class failed", "fingerprint", issuer.IssuerFingerprint, "error", err)
 		} else if tag.RowsAffected() > 0 {
@@ -365,15 +365,13 @@ func ComputeTrustLevel(identityClass string, pcrConsensus model.PCRConsensusStat
 		default:
 			return model.TrustLevelStandard
 		}
-	case tpm.IdentityClassUnverifiedHW:
+	case tpm.IdentityClassUnverified:
 		switch pcrConsensus {
 		case model.PCRConsensusOutlier:
 			return model.TrustLevelQuarantine
 		default:
 			return model.TrustLevelProvisional
 		}
-	case tpm.IdentityClassSoftware:
-		return model.TrustLevelSoftware
 	default:
 		return model.TrustLevelProvisional
 	}

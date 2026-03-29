@@ -14,7 +14,6 @@ const (
 	TrustLevelProvisional TrustLevel = "provisional"
 	TrustLevelSuspicious  TrustLevel = "suspicious"
 	TrustLevelQuarantine  TrustLevel = "quarantine"
-	TrustLevelSoftware    TrustLevel = "software"
 )
 
 type IssuerTier string

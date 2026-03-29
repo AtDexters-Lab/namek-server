@@ -8,7 +8,7 @@ import (
 // TestVerifier is a mock TPM verifier for testing.
 type TestVerifier struct {
 	VerifyEKCertFn     func(ekCertDER []byte) (*EKVerifyResult, error)
-	VerifyQuoteFn      func(akPubKeyDER []byte, nonce string, quoteB64 string, pcrValues map[int][]byte) (*QuoteResult, error)
+	VerifyQuoteFn      func(akPubKeyDER []byte, nonce []byte, quoteB64 string, pcrValues map[int][]byte) (*QuoteResult, error)
 	MakeCredentialFn   func(ekPubKey crypto.PublicKey, akName []byte, secret []byte) ([]byte, error)
 	ParseAKPublicFn    func(akParams []byte) ([]byte, []byte, error)
 	ExtractEKPubKeyFn  func(ekCertDER []byte) (crypto.PublicKey, error)
@@ -21,14 +21,14 @@ func (t *TestVerifier) VerifyEKCert(ekCertDER []byte) (*EKVerifyResult, error) {
 		return t.VerifyEKCertFn(ekCertDER)
 	}
 	return &EKVerifyResult{
-		IdentityClass:     IdentityClassSoftware,
+		IdentityClass:     IdentityClassUnverified,
 		EKPubKey:          nil,
 		IssuerFingerprint: "test-issuer-fp",
 		IssuerSubject:     "CN=Test Issuer",
 	}, nil
 }
 
-func (t *TestVerifier) VerifyQuote(akPubKeyDER []byte, nonce string, quoteB64 string, pcrValues map[int][]byte) (*QuoteResult, error) {
+func (t *TestVerifier) VerifyQuote(akPubKeyDER []byte, nonce []byte, quoteB64 string, pcrValues map[int][]byte) (*QuoteResult, error) {
 	if t.VerifyQuoteFn != nil {
 		return t.VerifyQuoteFn(akPubKeyDER, nonce, quoteB64, pcrValues)
 	}

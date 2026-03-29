@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -173,9 +174,16 @@ type enrollCompleteResponse struct {
 	Reenrolled     bool     `json:"reenrolled"`
 }
 
-// Enroll performs the 2-phase enrollment flow.
-func (c *Client) Enroll(ctx context.Context) (*EnrollResult, error) {
-	// Phase 1: Get EK cert and AK public
+// enrollPhase1Result holds the outputs of the shared enrollment Phase 1 logic.
+type enrollPhase1Result struct {
+	nonce    string // hex-encoded nonce (echoed back to server)
+	secret   []byte
+	quoteB64 string
+}
+
+// enrollPhase1 performs the shared first phase of enrollment:
+// EK/AK retrieval, start enroll POST, credential activation, and quote generation.
+func (c *Client) enrollPhase1(ctx context.Context) (*enrollPhase1Result, error) {
 	ekCert, err := c.tpm.EKCertDER()
 	if err != nil {
 		return nil, fmt.Errorf("get ek cert: %w", err)
@@ -185,7 +193,6 @@ func (c *Client) Enroll(ctx context.Context) (*EnrollResult, error) {
 		return nil, fmt.Errorf("get ak public: %w", err)
 	}
 
-	// POST /api/v1/devices/enroll
 	enrollBody := map[string]string{
 		"ek_cert":   base64.StdEncoding.EncodeToString(ekCert),
 		"ak_params": base64.StdEncoding.EncodeToString(akPub),
@@ -195,7 +202,6 @@ func (c *Client) Enroll(ctx context.Context) (*EnrollResult, error) {
 		return nil, fmt.Errorf("start enroll: %w", err)
 	}
 
-	// Decrypt credential challenge
 	encCredRaw, err := base64.StdEncoding.DecodeString(startResp.EncCredential)
 	if err != nil {
 		return nil, fmt.Errorf("decode enc_credential: %w", err)
@@ -205,17 +211,33 @@ func (c *Client) Enroll(ctx context.Context) (*EnrollResult, error) {
 		return nil, fmt.Errorf("activate credential: %w", err)
 	}
 
-	// Generate quote over enrollment nonce
-	quoteB64, err := c.tpm.Quote(startResp.Nonce)
+	nonceBytes, err := hex.DecodeString(startResp.Nonce)
+	if err != nil {
+		return nil, fmt.Errorf("decode enrollment nonce: %w", err)
+	}
+	quoteB64, err := c.tpm.Quote(nonceBytes)
 	if err != nil {
 		return nil, fmt.Errorf("generate quote: %w", err)
 	}
 
-	// POST /api/v1/devices/enroll/attest
+	return &enrollPhase1Result{
+		nonce:    startResp.Nonce,
+		secret:   secret,
+		quoteB64: quoteB64,
+	}, nil
+}
+
+// Enroll performs the 2-phase enrollment flow.
+func (c *Client) Enroll(ctx context.Context) (*EnrollResult, error) {
+	p1, err := c.enrollPhase1(ctx)
+	if err != nil {
+		return nil, err
+	}
+
 	attestBody := map[string]string{
-		"nonce":  startResp.Nonce,
-		"secret": base64.StdEncoding.EncodeToString(secret),
-		"quote":  quoteB64,
+		"nonce":  p1.nonce,
+		"secret": base64.StdEncoding.EncodeToString(p1.secret),
+		"quote":  p1.quoteB64,
 	}
 	var completeResp enrollCompleteResponse
 	if err := c.doJSON(ctx, http.MethodPost, "/api/v1/devices/enroll/attest", attestBody, &completeResp); err != nil {
@@ -243,44 +265,15 @@ type RecoveryBundleInput struct {
 
 // EnrollWithRecovery performs the 2-phase enrollment flow with a recovery bundle.
 func (c *Client) EnrollWithRecovery(ctx context.Context, bundle *RecoveryBundleInput) (*EnrollResult, error) {
-	// Phase 1: same as normal enrollment
-	ekCert, err := c.tpm.EKCertDER()
+	p1, err := c.enrollPhase1(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("get ek cert: %w", err)
-	}
-	akPub, err := c.tpm.AKPublic()
-	if err != nil {
-		return nil, fmt.Errorf("get ak public: %w", err)
+		return nil, err
 	}
 
-	enrollBody := map[string]string{
-		"ek_cert":   base64.StdEncoding.EncodeToString(ekCert),
-		"ak_params": base64.StdEncoding.EncodeToString(akPub),
-	}
-	var startResp enrollStartResponse
-	if err := c.doJSON(ctx, http.MethodPost, "/api/v1/devices/enroll", enrollBody, &startResp); err != nil {
-		return nil, fmt.Errorf("start enroll: %w", err)
-	}
-
-	encCredRaw, err := base64.StdEncoding.DecodeString(startResp.EncCredential)
-	if err != nil {
-		return nil, fmt.Errorf("decode enc_credential: %w", err)
-	}
-	secret, err := c.tpm.ActivateCredential(encCredRaw)
-	if err != nil {
-		return nil, fmt.Errorf("activate credential: %w", err)
-	}
-
-	quoteB64, err := c.tpm.Quote(startResp.Nonce)
-	if err != nil {
-		return nil, fmt.Errorf("generate quote: %w", err)
-	}
-
-	// Phase 2: include recovery bundle
 	attestBody := map[string]any{
-		"nonce":  startResp.Nonce,
-		"secret": base64.StdEncoding.EncodeToString(secret),
-		"quote":  quoteB64,
+		"nonce":  p1.nonce,
+		"secret": base64.StdEncoding.EncodeToString(p1.secret),
+		"quote":  p1.quoteB64,
 	}
 
 	if bundle != nil {
@@ -638,7 +631,11 @@ func (c *Client) doAuthenticated(ctx context.Context, method, path string, body 
 		}
 
 		// 2. Generate TPM quote over nonce
-		quoteB64, err := c.tpm.Quote(nonceResp.Nonce)
+		authNonceBytes, err := base64.RawURLEncoding.DecodeString(nonceResp.Nonce)
+		if err != nil {
+			return fmt.Errorf("decode auth nonce: %w", err)
+		}
+		quoteB64, err := c.tpm.Quote(authNonceBytes)
 		if err != nil {
 			return fmt.Errorf("generate quote: %w", err)
 		}

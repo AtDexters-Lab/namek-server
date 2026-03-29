@@ -8,7 +8,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const currentVersion = 2
+const currentVersion = 3
 
 var migrations = []string{
 	// Version 1: Consolidated schema (original + ACME certs + backend port + RFC 004 stateless resilience)
@@ -230,6 +230,19 @@ var migrations = []string{
 
 	// Version 2: Audit log index for dashboard query performance
 	`CREATE INDEX IF NOT EXISTS idx_audit_log_action_id ON audit_log(action text_pattern_ops, id DESC);`,
+
+	// Version 3: Consolidate identity classes — rename "unverified_hw" to "unverified",
+	// remove "software" (was incorrectly assigned to real hardware TPMs with unverifiable EK certs).
+	// Also remove "software" trust level (no longer produced by any code path).
+	`UPDATE devices SET identity_class = 'unverified' WHERE identity_class IN ('software', 'unverified_hw');
+	 UPDATE devices SET trust_level = 'provisional' WHERE trust_level = 'software' AND trust_level_override IS NULL;
+	 UPDATE devices SET trust_level_override = 'provisional' WHERE trust_level_override = 'software';
+	 ALTER TABLE devices DROP CONSTRAINT IF EXISTS devices_identity_class_check;
+	 ALTER TABLE devices ADD CONSTRAINT devices_identity_class_check CHECK (identity_class IN ('verified', 'crowd_corroborated', 'unverified'));
+	 ALTER TABLE devices DROP CONSTRAINT IF EXISTS devices_trust_level_check;
+	 ALTER TABLE devices ADD CONSTRAINT devices_trust_level_check CHECK (trust_level IN ('strong','standard','provisional','suspicious','quarantine'));
+	 ALTER TABLE devices DROP CONSTRAINT IF EXISTS devices_trust_level_override_check;
+	 ALTER TABLE devices ADD CONSTRAINT devices_trust_level_override_check CHECK (trust_level_override IS NULL OR trust_level_override IN ('strong','standard','provisional','suspicious','quarantine'));`,
 }
 
 func Migrate(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger) error {

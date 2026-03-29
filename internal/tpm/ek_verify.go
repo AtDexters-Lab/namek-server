@@ -26,16 +26,14 @@ import (
 )
 
 type realVerifier struct {
-	hardwareCAs      *x509.CertPool
-	allowSoftwareTPM bool
-	logger           *slog.Logger
+	hardwareCAs *x509.CertPool
+	logger      *slog.Logger
 }
 
 func NewVerifier(cfg config.TPMConfig, logger *slog.Logger) (Verifier, error) {
 	v := &realVerifier{
-		hardwareCAs:      x509.NewCertPool(),
-		allowSoftwareTPM: cfg.AllowSoftwareTPM,
-		logger:           logger,
+		hardwareCAs: x509.NewCertPool(),
+		logger:      logger,
 	}
 
 	loaded := 0
@@ -46,12 +44,12 @@ func NewVerifier(cfg config.TPMConfig, logger *slog.Logger) (Verifier, error) {
 		loaded += v.loadCertsFromDir(cfg.SeedBundleDir, v.hardwareCAs, "seed-bundle")
 	}
 
-	if loaded == 0 && !cfg.AllowSoftwareTPM {
-		logger.Warn("no TPM CA certificates loaded and allowSoftwareTPM is false: all devices will be classified as unverified_hw")
+	if loaded == 0 {
+		logger.Warn("no TPM CA certificates loaded: all devices will be classified as unverified")
 	}
 
 	if cfg.AllowSoftwareTPM {
-		logger.Warn("allowSoftwareTPM is enabled: unverifiable EK certs will be accepted as software tier")
+		logger.Warn("allowSoftwareTPM is deprecated and has no effect; unverifiable EK certs are always accepted as unverified")
 	}
 	logger.Info("tpm verifier initialized", "hardwareCAs", loaded, "allowSoftwareTPM", cfg.AllowSoftwareTPM)
 	return v, nil
@@ -137,14 +135,9 @@ func (v *realVerifier) VerifyEKCert(ekCertDER []byte) (*EKVerifyResult, error) {
 		return result, nil
 	}
 
-	// If software TPM is allowed, accept any EK that didn't match hardware CAs
-	if v.allowSoftwareTPM {
-		result.IdentityClass = IdentityClassSoftware
-		return result, nil
-	}
-
-	// Credential activation proves real TPM — classify as unverified hardware
-	result.IdentityClass = IdentityClassUnverifiedHW
+	// EK cert not verifiable against trusted CAs — classify as unverified hardware.
+	// Credential activation will prove real TPM possession regardless.
+	result.IdentityClass = IdentityClassUnverified
 	return result, nil
 }
 
@@ -240,7 +233,7 @@ const (
 // Wire format for quoteB64 (after base64 decode):
 //
 //	uint32(quoteLen) [big-endian] || TPMS_ATTEST || TPMT_SIGNATURE
-func (v *realVerifier) VerifyQuote(akPubKeyDER []byte, nonce string, quoteB64 string, pcrValues map[int][]byte) (*QuoteResult, error) {
+func (v *realVerifier) VerifyQuote(akPubKeyDER []byte, nonce []byte, quoteB64 string, pcrValues map[int][]byte) (*QuoteResult, error) {
 	akPub, err := attest.ParseAKPublic(akPubKeyDER)
 	if err != nil {
 		return nil, fmt.Errorf("parse AK public: %w", err)
@@ -290,7 +283,7 @@ func (v *realVerifier) VerifyQuote(akPubKeyDER []byte, nonce string, quoteB64 st
 		}
 	}
 
-	if err := akPub.Verify(attest.Quote{Quote: quoteBytes, Signature: sigBytes}, pcrs, []byte(nonce)); err != nil {
+	if err := akPub.Verify(attest.Quote{Quote: quoteBytes, Signature: sigBytes}, pcrs, nonce); err != nil {
 		v.logger.Warn("quote verification failed", "error", err)
 		return nil, fmt.Errorf("verify quote: %w", err)
 	}

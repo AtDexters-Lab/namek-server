@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"crypto/x509"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -89,7 +90,14 @@ func DeviceTPMAuth(deviceStore *store.DeviceStore, nonceStore *NonceStore, verif
 		}
 
 		// Verify TPM quote
-		if _, err := verifier.VerifyQuote(device.AKPublicKey, nonce, quoteB64, nil); err != nil {
+		nonceBytes, err := base64.RawURLEncoding.DecodeString(nonce)
+		if err != nil {
+			logger.Warn("nonce decode failed", "device_id", deviceID, "error", err)
+			httputil.RespondUnauthorized(c, "invalid nonce encoding")
+			c.Abort()
+			return
+		}
+		if _, err := verifier.VerifyQuote(device.AKPublicKey, nonceBytes, quoteB64, nil); err != nil {
 			logger.Warn("tpm quote verification failed",
 				"device_id", deviceID,
 				"error", err,

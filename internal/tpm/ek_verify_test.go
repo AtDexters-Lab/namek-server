@@ -227,7 +227,7 @@ func TestVerifyQuote_InvalidFormat(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := v.VerifyQuote(akParams, "test-nonce", tt.quoteB64, nil)
+			_, err := v.VerifyQuote(akParams, []byte("test-nonce"), tt.quoteB64, nil)
 			if err == nil {
 				t.Error("expected error for invalid quote format")
 			}
@@ -237,7 +237,7 @@ func TestVerifyQuote_InvalidFormat(t *testing.T) {
 
 func TestVerifyQuote_InvalidAKPublic(t *testing.T) {
 	v := &realVerifier{logger: noopLogger()}
-	_, err := v.VerifyQuote([]byte{0xDE, 0xAD}, "nonce", base64.StdEncoding.EncodeToString([]byte("data")), nil)
+	_, err := v.VerifyQuote([]byte{0xDE, 0xAD}, []byte("nonce"), base64.StdEncoding.EncodeToString([]byte("data")), nil)
 	if err == nil {
 		t.Error("expected error for invalid AK public")
 	}

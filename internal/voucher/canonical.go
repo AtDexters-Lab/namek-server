@@ -2,7 +2,6 @@ package voucher
 
 import (
 	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 )
@@ -33,9 +32,9 @@ func Canonicalize(v *VoucherData) ([]byte, error) {
 	return data, nil
 }
 
-// NonceFromData computes the hex-encoded SHA-256 hash of canonical JSON bytes.
-// This is used as the TPM quote nonce for voucher signing.
-func NonceFromData(canonical []byte) string {
+// NonceFromData computes the SHA-256 hash of canonical JSON bytes.
+// The raw 32-byte hash is returned for direct use as TPM qualifyingData.
+func NonceFromData(canonical []byte) []byte {
 	h := sha256.Sum256(canonical)
-	return hex.EncodeToString(h[:])
+	return h[:]
 }

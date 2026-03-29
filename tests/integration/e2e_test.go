@@ -70,7 +70,7 @@ func TestFullFlow(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotEmpty(t, result.DeviceID)
 	assert.Contains(t, result.Hostname, ".test.local")
-	assert.Equal(t, "software", result.IdentityClass)
+	assert.Equal(t, "unverified", result.IdentityClass)
 	// Slug-based hostname: should be 20-char slug + ".test.local", not UUID-based
 	assert.NotContains(t, result.Hostname, "-", "hostname should be slug-based, not UUID-based")
 

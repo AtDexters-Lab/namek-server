@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -294,12 +293,12 @@ func (d *device) ActivateCredential(encCredential []byte) ([]byte, error) {
 
 func (d *device) QuoteOverData(data []byte) (string, error) {
 	h := sha256.Sum256(data)
-	return d.Quote(hex.EncodeToString(h[:]))
+	return d.Quote(h[:])
 }
 
-func (d *device) Quote(nonce string) (string, error) {
+func (d *device) Quote(nonce []byte) (string, error) {
 	attest, sig, err := tpm2.QuoteRaw(d.rw, d.akHandle, "", "",
-		[]byte(nonce),
+		nonce,
 		tpm2.PCRSelection{Hash: tpm2.AlgSHA256},
 		tpm2.AlgNull)
 	if err != nil {

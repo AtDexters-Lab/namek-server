@@ -193,7 +193,7 @@ func (h *CensusHandler) TrustOverride(c *gin.Context) {
 	tl := model.TrustLevel(req.TrustLevel)
 	switch tl {
 	case model.TrustLevelStrong, model.TrustLevelStandard, model.TrustLevelProvisional,
-		model.TrustLevelSuspicious, model.TrustLevelQuarantine, model.TrustLevelSoftware:
+		model.TrustLevelSuspicious, model.TrustLevelQuarantine:
 	default:
 		httputil.RespondBadRequest(c, "invalid trust_level")
 		return

@@ -316,7 +316,7 @@ func TestDeterministicIdentityRecovery(t *testing.T) {
 	assert.Len(t, slug, 20, "slug should be 20 chars")
 
 	// Verify the identity class is correct
-	assert.Equal(t, "software", result2.IdentityClass)
+	assert.Equal(t, "unverified", result2.IdentityClass)
 
 	// Cleanup
 	os.RemoveAll(stateDir)

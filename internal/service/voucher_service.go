@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -218,7 +219,7 @@ func (s *VoucherService) GetPendingRequests(ctx context.Context, deviceID uuid.U
 		result = append(result, PendingVoucherRequest{
 			RequestID:   r.ID,
 			VoucherData: r.VoucherData,
-			Nonce:       voucher.NonceFromData(voucherDataBytes),
+			Nonce:       hex.EncodeToString(voucher.NonceFromData(voucherDataBytes)),
 		})
 	}
 	return result, nil

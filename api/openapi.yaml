@@ -421,7 +421,7 @@ components:
           description: UUID-based hostname (e.g., abc123.piccolospace.com)
         identity_class:
           type: string
-          enum: [hardware_tpm, software_tpm]
+          enum: [verified, crowd_corroborated, unverified]
         nexus_endpoints:
           type: array
           items:
@@ -447,7 +447,7 @@ components:
           enum: [active, suspended, revoked]
         identity_class:
           type: string
-          enum: [hardware_tpm, software_tpm]
+          enum: [verified, crowd_corroborated, unverified]
         nexus_endpoints:
           type: array
           items:

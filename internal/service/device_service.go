@@ -5,6 +5,7 @@ import (
 	"crypto"
 	"crypto/rand"
 	"crypto/subtle"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -187,7 +188,7 @@ func (s *DeviceService) StartEnrollment(ctx context.Context, req EnrollRequest, 
 	if _, err := rand.Read(nonceBytes); err != nil {
 		return nil, fmt.Errorf("generate nonce: %w", err)
 	}
-	nonce := fmt.Sprintf("%x", nonceBytes)
+	nonce := hex.EncodeToString(nonceBytes)
 
 	// Store pending enrollment
 	s.mu.Lock()
@@ -295,13 +296,17 @@ func (s *DeviceService) CompleteEnrollment(ctx context.Context, req AttestReques
 	}
 
 	// Verify TPM quote (with PCR validation if provided)
-	if _, err := verifier.VerifyQuote(pe.AKPubKeyDER, req.Nonce, req.QuoteB64, req.PCRValues); err != nil {
+	nonceBytes, err := hex.DecodeString(req.Nonce)
+	if err != nil {
+		return nil, fmt.Errorf("decode nonce: %w", err)
+	}
+	if _, err := verifier.VerifyQuote(pe.AKPubKeyDER, nonceBytes, req.QuoteB64, req.PCRValues); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrQuoteVerification, err)
 	}
 
 	// Resolve identity class (check for census-based promotion)
 	identityClass := pe.IdentityClass
-	if identityClass == tpm.IdentityClassUnverifiedHW && pe.EKVerifyResult != nil {
+	if identityClass == tpm.IdentityClassUnverified && pe.EKVerifyResult != nil {
 		issuer, err := s.censusStore.GetIssuerByFingerprint(ctx, pe.EKVerifyResult.IssuerFingerprint)
 		if err == nil && issuer.Tier == model.IssuerTierCrowdCorroborated {
 			identityClass = tpm.IdentityClassCrowdCorroborated

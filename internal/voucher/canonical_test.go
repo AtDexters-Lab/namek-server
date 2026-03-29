@@ -1,6 +1,7 @@
 package voucher
 
 import (
+	"bytes"
 	"encoding/json"
 	"testing"
 )
@@ -69,11 +70,11 @@ func TestNonceFromData_Deterministic(t *testing.T) {
 	data := []byte(`{"account_id":"test","version":1}`)
 	n1 := NonceFromData(data)
 	n2 := NonceFromData(data)
-	if n1 != n2 {
-		t.Errorf("NonceFromData not deterministic: %s != %s", n1, n2)
+	if !bytes.Equal(n1, n2) {
+		t.Errorf("NonceFromData not deterministic: %x != %x", n1, n2)
 	}
-	if len(n1) != 64 {
-		t.Errorf("nonce length = %d, want 64 (hex SHA-256)", len(n1))
+	if len(n1) != 32 {
+		t.Errorf("nonce length = %d, want 32 (raw SHA-256)", len(n1))
 	}
 }
 

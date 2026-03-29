@@ -7,7 +7,7 @@ import (
 
 // EKVerifyResult contains the results of EK certificate verification.
 type EKVerifyResult struct {
-	IdentityClass     string          // "verified" | "unverified_hw" | "software"
+	IdentityClass     string          // "verified" | "unverified"
 	EKPubKey          crypto.PublicKey
 	IssuerFingerprint string // SHA-256 of issuer SubjectPublicKeyInfo (or issuer DN as fallback)
 	IssuerSubject     string
@@ -23,9 +23,10 @@ type Verifier interface {
 	VerifyEKCert(ekCertDER []byte) (*EKVerifyResult, error)
 
 	// VerifyQuote verifies a TPM quote signed by the given AK public key.
+	// nonce is the raw bytes that were passed to the TPM as qualifyingData.
 	// When pcrValues is non-nil, the quote's PCR digest is verified against
 	// the provided values. When nil, PCR validation is skipped.
-	VerifyQuote(akPubKeyDER []byte, nonce string, quoteB64 string, pcrValues map[int][]byte) (*QuoteResult, error)
+	VerifyQuote(akPubKeyDER []byte, nonce []byte, quoteB64 string, pcrValues map[int][]byte) (*QuoteResult, error)
 
 	// MakeCredential creates an encrypted credential challenge for the TPM.
 	MakeCredential(ekPubKey crypto.PublicKey, akName []byte, secret []byte) ([]byte, error)
