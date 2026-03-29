@@ -156,12 +156,13 @@ func (h *DeviceEnrollHandler) CompleteEnroll(c *gin.Context) {
 		return
 	}
 
-	// Get Nexus endpoints for the response
+	// Get Nexus endpoints and relay services for the response
 	endpoints, err := h.nexusSvc.GetActiveEndpoints(c.Request.Context())
 	if err != nil {
 		h.logger.Error("failed to get nexus endpoints", "error", err)
 		endpoints = []string{}
 	}
+	relayServices := h.nexusSvc.GetActiveRelayServices()
 
 	// Parse PCR values from hex strings to raw bytes
 	var pcrValues map[int][]byte
@@ -240,6 +241,9 @@ func (h *DeviceEnrollHandler) CompleteEnroll(c *gin.Context) {
 	}
 	if len(resp.NexusEndpoints) == 0 {
 		result["retry_after_seconds"] = 5
+	}
+	if relayServices != nil {
+		result["relay_services"] = relayServices
 	}
 
 	if resp.Reenrolled {

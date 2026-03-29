@@ -21,9 +21,14 @@ func NewNexusRegisterHandler(nexusSvc *service.NexusService, logger *slog.Logger
 	}
 }
 
+type nexusServices struct {
+	StunPort int `json:"stunPort,omitempty"`
+}
+
 type nexusRegisterRequest struct {
-	Region      *string `json:"region"`
-	BackendPort int     `json:"backendPort" binding:"required"`
+	Region      *string         `json:"region"`
+	BackendPort int             `json:"backendPort" binding:"required"`
+	Services    *nexusServices  `json:"services,omitempty"`
 }
 
 func (h *NexusRegisterHandler) Register(c *gin.Context) {
@@ -38,17 +43,29 @@ func (h *NexusRegisterHandler) Register(c *gin.Context) {
 		return
 	}
 
+	if req.Services != nil && req.Services.StunPort != 0 {
+		if req.Services.StunPort < 1 || req.Services.StunPort > 65535 {
+			httputil.RespondBadRequest(c, "services.stunPort must be between 1 and 65535")
+			return
+		}
+	}
+
 	hostname, exists := c.Get("nexus_hostname")
 	if !exists {
 		httputil.RespondInternalError(c)
 		return
 	}
 
-	resp, err := h.nexusSvc.Register(c.Request.Context(), service.RegisterNexusRequest{
+	svcReq := service.RegisterNexusRequest{
 		Hostname:    hostname.(string),
 		Region:      req.Region,
 		BackendPort: req.BackendPort,
-	})
+	}
+	if req.Services != nil {
+		svcReq.Services = &service.NexusServicesInfo{StunPort: req.Services.StunPort}
+	}
+
+	resp, err := h.nexusSvc.Register(c.Request.Context(), svcReq)
 	if err != nil {
 		h.logger.Error("nexus registration failed",
 			"hostname", hostname,

@@ -56,6 +56,8 @@ func (h *DeviceHandler) GetMe(c *gin.Context) {
 		endpoints = []string{}
 	}
 
+	relayServices := h.nexusSvc.GetActiveRelayServices()
+
 	aliasDomains, err := h.domainSvc.GetDeviceAliasDomains(c.Request.Context(), d.ID)
 	if err != nil {
 		h.logger.Error("failed to get alias domains", "device_id", d.ID, "error", err)
@@ -90,6 +92,10 @@ func (h *DeviceHandler) GetMe(c *gin.Context) {
 		"account_id":         d.AccountID,
 		"recovery_status":    recoveryStatus,
 		"nexus_endpoints":    endpoints,
+	}
+
+	if relayServices != nil {
+		resp["relay_services"] = relayServices
 	}
 
 	// Conditionally include voucher data (optimization: only query when device

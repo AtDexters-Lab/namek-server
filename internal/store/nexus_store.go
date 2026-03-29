@@ -100,27 +100,32 @@ func (s *NexusStore) ListActive(ctx context.Context) ([]*model.NexusInstance, er
 	return instances, rows.Err()
 }
 
-func (s *NexusStore) MarkInactive(ctx context.Context, thresholdSeconds int) ([]uuid.UUID, error) {
+type InactiveNexus struct {
+	ID       uuid.UUID
+	Hostname string
+}
+
+func (s *NexusStore) MarkInactive(ctx context.Context, thresholdSeconds int) ([]InactiveNexus, error) {
 	rows, err := s.pool.Query(ctx, `
 		UPDATE nexus_instances
 		SET status = 'inactive'
 		WHERE last_seen_at < NOW() - make_interval(secs => $1) AND status = 'active'
-		RETURNING id
+		RETURNING id, hostname
 	`, thresholdSeconds)
 	if err != nil {
 		return nil, fmt.Errorf("mark inactive nexus instances: %w", err)
 	}
 	defer rows.Close()
 
-	var ids []uuid.UUID
+	var results []InactiveNexus
 	for rows.Next() {
-		var id uuid.UUID
-		if err := rows.Scan(&id); err != nil {
-			return nil, fmt.Errorf("scan inactive nexus id: %w", err)
+		var n InactiveNexus
+		if err := rows.Scan(&n.ID, &n.Hostname); err != nil {
+			return nil, fmt.Errorf("scan inactive nexus: %w", err)
 		}
-		ids = append(ids, id)
+		results = append(results, n)
 	}
-	return ids, rows.Err()
+	return results, rows.Err()
 }
 
 func (s *NexusStore) UpdateResolvedAddresses(ctx context.Context, id uuid.UUID, addrs []net.IP) error {

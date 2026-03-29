@@ -332,6 +332,15 @@ paths:
                   minimum: 1
                   maximum: 65535
                   description: Port the relay listens on for backend device connections
+                services:
+                  type: object
+                  description: Optional capability advertisement
+                  properties:
+                    stunPort:
+                      type: integer
+                      minimum: 1
+                      maximum: 65535
+                      description: Port for the embedded STUN server (RFC 5389)
       responses:
         '200':
           description: Registration accepted
@@ -433,6 +442,16 @@ components:
           items:
             type: string
           description: WebSocket URLs for Nexus instances (e.g., wss://relay.example.com:8443/connect)
+        relay_services:
+          type: object
+          description: Additional relay service endpoints, omitted when none available
+          additionalProperties:
+            type: array
+            items:
+              type: string
+          example:
+            stun:
+              - "relay.example.com:3478"
         retry_after_seconds:
           type: integer
           description: Present when nexus_endpoints is empty
@@ -459,6 +478,16 @@ components:
           items:
             type: string
           description: WebSocket URLs for Nexus instances (e.g., wss://relay.example.com:8443/connect)
+        relay_services:
+          type: object
+          description: Additional relay service endpoints, omitted when none available
+          additionalProperties:
+            type: array
+            items:
+              type: string
+          example:
+            stun:
+              - "relay.example.com:3478"
 
     TokenRequest:
       type: object

@@ -2,12 +2,13 @@ package namekclient
 
 // EnrollResult is returned after successful enrollment.
 type EnrollResult struct {
-	DeviceID       string   `json:"device_id"`
-	Hostname       string   `json:"hostname"`
-	IdentityClass  string   `json:"identity_class"`
-	TrustLevel     string   `json:"trust_level"`
-	NexusEndpoints []string `json:"nexus_endpoints"`
-	Reenrolled     bool     `json:"reenrolled,omitempty"`
+	DeviceID       string              `json:"device_id"`
+	Hostname       string              `json:"hostname"`
+	IdentityClass  string              `json:"identity_class"`
+	TrustLevel     string              `json:"trust_level"`
+	NexusEndpoints []string            `json:"nexus_endpoints"`
+	RelayServices  map[string][]string `json:"relay_services,omitempty"`
+	Reenrolled     bool                `json:"reenrolled,omitempty"`
 }
 
 // DeviceInfo is returned from GET /devices/me.
@@ -23,6 +24,7 @@ type DeviceInfo struct {
 	OSVersion              *string                 `json:"os_version,omitempty"`
 	RecoveryStatus         string                  `json:"recovery_status"`
 	NexusEndpoints         []string                `json:"nexus_endpoints"`
+	RelayServices          map[string][]string     `json:"relay_services,omitempty"`
 	AliasDomains           []string                `json:"alias_domains,omitempty"`
 	PendingVoucherRequests []PendingVoucherRequest `json:"pending_voucher_requests,omitempty"`
 	NewVouchers            []VoucherArtifact       `json:"new_vouchers,omitempty"`

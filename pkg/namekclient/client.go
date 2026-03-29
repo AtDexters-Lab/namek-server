@@ -167,11 +167,12 @@ type enrollStartResponse struct {
 
 // enrollCompleteResponse matches the server's CompleteEnroll JSON response.
 type enrollCompleteResponse struct {
-	DeviceID       string   `json:"device_id"`
-	Hostname       string   `json:"hostname"`
-	IdentityClass  string   `json:"identity_class"`
-	NexusEndpoints []string `json:"nexus_endpoints"`
-	Reenrolled     bool     `json:"reenrolled"`
+	DeviceID       string              `json:"device_id"`
+	Hostname       string              `json:"hostname"`
+	IdentityClass  string              `json:"identity_class"`
+	NexusEndpoints []string            `json:"nexus_endpoints"`
+	RelayServices  map[string][]string `json:"relay_services,omitempty"`
+	Reenrolled     bool                `json:"reenrolled"`
 }
 
 // enrollPhase1Result holds the outputs of the shared enrollment Phase 1 logic.
@@ -258,6 +259,7 @@ func (c *Client) Enroll(ctx context.Context) (*EnrollResult, error) {
 		Hostname:       completeResp.Hostname,
 		IdentityClass:  completeResp.IdentityClass,
 		NexusEndpoints: completeResp.NexusEndpoints,
+		RelayServices:  completeResp.RelayServices,
 		Reenrolled:     completeResp.Reenrolled,
 	}, nil
 }
@@ -321,6 +323,7 @@ func (c *Client) EnrollWithRecovery(ctx context.Context, bundle *RecoveryBundleI
 		Hostname:       completeResp.Hostname,
 		IdentityClass:  completeResp.IdentityClass,
 		NexusEndpoints: completeResp.NexusEndpoints,
+		RelayServices:  completeResp.RelayServices,
 		Reenrolled:     completeResp.Reenrolled,
 	}, nil
 }

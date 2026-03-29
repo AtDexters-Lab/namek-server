@@ -8,6 +8,8 @@ import (
 	"maps"
 	"net"
 	"slices"
+	"strconv"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -25,6 +27,9 @@ type NexusService struct {
 	pdns       *dns.PowerDNSClient
 	cfg        *config.Config
 	logger     *slog.Logger
+
+	svcMu    sync.RWMutex
+	services map[string]*NexusServicesInfo // hostname -> services (instance-local, not DB-backed)
 }
 
 func NewNexusService(nexusStore *store.NexusStore, auditStore *store.AuditStore, pdns *dns.PowerDNSClient, cfg *config.Config, logger *slog.Logger) *NexusService {
@@ -34,13 +39,19 @@ func NewNexusService(nexusStore *store.NexusStore, auditStore *store.AuditStore,
 		pdns:       pdns,
 		cfg:        cfg,
 		logger:     logger,
+		services:   make(map[string]*NexusServicesInfo),
 	}
+}
+
+type NexusServicesInfo struct {
+	StunPort int
 }
 
 type RegisterNexusRequest struct {
 	Hostname    string
 	Region      *string
 	BackendPort int
+	Services    *NexusServicesInfo
 }
 
 type RegisterNexusResponse struct {
@@ -74,6 +85,9 @@ func (s *NexusService) Register(ctx context.Context, req RegisterNexusRequest) (
 		if err := s.nexusStore.Upsert(ctx, existing); err != nil {
 			return nil, fmt.Errorf("update nexus instance: %w", err)
 		}
+
+		// Update in-memory services map (must come after successful Upsert)
+		s.updateServices(req.Hostname, req.Services)
 
 		// Restore relay DNS and audit if this instance was previously inactive
 		if wasInactive {
@@ -131,6 +145,9 @@ func (s *NexusService) Register(ctx context.Context, req RegisterNexusRequest) (
 		return nil, fmt.Errorf("upsert nexus instance: %w", err)
 	}
 
+	// Update in-memory services map (must come after successful Upsert)
+	s.updateServices(req.Hostname, req.Services)
+
 	// Update relay DNS (best-effort)
 	if err := s.updateRelayDNS(ctx); err != nil {
 		s.logger.Error("failed to update relay dns after nexus registration",
@@ -174,6 +191,54 @@ func (s *NexusService) GetActiveEndpoints(ctx context.Context) ([]string, error)
 	return endpoints, nil
 }
 
+// updateServices stores or removes a relay's service capabilities in the in-memory map.
+// nil svc means the heartbeat didn't include services — preserve existing entry.
+// Non-nil svc with StunPort == 0 means the relay explicitly de-advertised — delete entry.
+func (s *NexusService) updateServices(hostname string, svc *NexusServicesInfo) {
+	if svc == nil {
+		return // heartbeat didn't mention services — preserve existing
+	}
+
+	s.svcMu.Lock()
+	defer s.svcMu.Unlock()
+
+	if svc.StunPort != 0 {
+		s.services[hostname] = svc
+	} else {
+		prev := s.services[hostname]
+		delete(s.services, hostname)
+		if prev != nil {
+			s.logger.Info("relay stopped advertising STUN", "hostname", hostname)
+		}
+	}
+}
+
+// GetActiveRelayServices returns aggregated relay service endpoints from the in-memory map.
+// Returns nil when no services are available (ensures omitempty omits the field).
+func (s *NexusService) GetActiveRelayServices() map[string][]string {
+	s.svcMu.RLock()
+	defer s.svcMu.RUnlock()
+
+	if len(s.services) == 0 {
+		return nil
+	}
+
+	var stunEndpoints []string
+	for hostname, svc := range s.services {
+		stunEndpoints = append(stunEndpoints, net.JoinHostPort(hostname, strconv.Itoa(svc.StunPort)))
+	}
+
+	if len(stunEndpoints) == 0 {
+		return nil
+	}
+
+	slices.Sort(stunEndpoints)
+
+	return map[string][]string{
+		"stun": stunEndpoints,
+	}
+}
+
 // HealthCheckLoop periodically checks for inactive Nexus instances.
 func (s *NexusService) HealthCheckLoop(ctx context.Context) {
 	ticker := time.NewTicker(s.cfg.HeartbeatInterval())
@@ -193,18 +258,25 @@ func (s *NexusService) healthCheck(ctx context.Context) {
 	thresholdSecs := s.cfg.Nexus.HeartbeatIntervalSeconds * s.cfg.Nexus.InactiveThresholdMultiplier
 
 	// Mark stale instances as inactive
-	inactiveIDs, err := s.nexusStore.MarkInactive(ctx, thresholdSecs)
+	inactive, err := s.nexusStore.MarkInactive(ctx, thresholdSecs)
 	if err != nil {
 		s.logger.Error("failed to mark inactive nexus instances", "error", err)
 		return
 	}
 
-	if len(inactiveIDs) > 0 {
-		s.logger.Info("marked nexus instances inactive", "count", len(inactiveIDs))
+	if len(inactive) > 0 {
+		s.logger.Info("marked nexus instances inactive", "count", len(inactive))
 
-		for _, id := range inactiveIDs {
+		// Clean up in-memory services for newly inactive relays
+		s.svcMu.Lock()
+		for _, inst := range inactive {
+			delete(s.services, inst.Hostname)
+		}
+		s.svcMu.Unlock()
+
+		for _, inst := range inactive {
 			s.auditStore.LogAction(ctx, model.ActorTypeSystem, "health_check",
-				"nexus.inactive", "nexus_instance", strPtr(id.String()), nil, nil)
+				"nexus.inactive", "nexus_instance", strPtr(inst.ID.String()), nil, nil)
 			metrics.Get().Nexus.MarkedInactive.Add(1)
 		}
 
