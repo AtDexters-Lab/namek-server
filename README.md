@@ -45,7 +45,7 @@ Namek is the control plane for Piccolo OS deployments. It handles the responsibi
 ```
 ┌──────────────┐       ┌──────────────┐       ┌──────────────────┐
 │   piccolod   │◄─────►│ Namek Server │◄─────►│  Nexus Proxy     │
-│  (on device) │       │ (orchestrator)│       │  (edge relay)    │
+│  (on device) │       │ (orchestrator)│      │  (edge relay)    │
 └──────────────┘       └──────────────┘       └──────────────────┘
        │                      │
        │  Device attestation  │  DNS-01 challenges
