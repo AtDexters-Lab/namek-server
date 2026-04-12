@@ -2,6 +2,8 @@
 
 Spec for integrating piccolod with namek-server for TPM-attested remote device access.
 
+> **Setup discovery (mDNS fallback)** is specified separately in [setup-discovery-integration.md](setup-discovery-integration.md). That doc covers the heartbeat + discover flow, the new namekclient v0.2.0 symbols (`WithHardwareModel`, `SendHeartbeat`, `HeartbeatRequest`), and `lan_ips` validation rules.
+
 ## 1. Overview
 
 Namek is a device attestation and authorization server. It verifies that a device has a genuine TPM, issues short-lived JWTs for relay (Nexus) authentication, and manages DNS records for device routing.
