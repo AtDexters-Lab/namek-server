@@ -1,6 +1,6 @@
 # Setup Discovery Integration Spec
 
-Spec for integrating piccolod and piccolospace with namek-server's mDNS-fallback setup discovery flow. Shipped in namek-server commit `1c88770` (target tag `v0.2.0`).
+Spec for integrating piccolod and piccolospace with namek-server's mDNS-fallback setup discovery flow. Ships in namek-server tag `v0.2.0`.
 
 ## 1. Problem
 
@@ -230,7 +230,7 @@ The frontend polls discover and renders the result. Three contracts apply.
 
 ## 7. Rollout Steps
 
-1. **namek-server** — merged on `main` as commit `1c88770`. Pending: 48-hour staging soak (see §8 for exit criteria), then `git tag v0.2.0`.
+1. **namek-server** — merged on `main`. Pending: 48-hour staging soak (see §8 for exit criteria), then `git tag v0.2.0`.
 2. **piccolod** — update `go.mod` to `github.com/AtDexters-Lab/namek-server@v0.2.0` after the soak. Implement the heartbeat loop per §4. No coordination with the namek-server team required beyond the tag.
 3. **piccolospace** — implement the polling page per §6. Point at `https://namek.piccolospace.com/api/v1/setup/discover`. Can deploy as soon as namek-server is on main (the endpoint will be live).
 
@@ -265,7 +265,7 @@ Run against a canary device on staging before tagging `v0.2.0`. Exit criteria (a
 
 ## 9. References
 
-- Implementation commit: `1c88770` (namek-server main)
+- Implementation: `git log --grep='setup discovery endpoint'` on `main`
 - Plan: `~/.claude/plans/cheeky-shimmying-shamir.md` (internal)
 - Original cross-repo RFC: `~/.claude/plans/purring-launching-blanket.md` (internal, authored by piccolod team)
 - Piccolod integration reference: [piccolod-integration-spec.md](piccolod-integration-spec.md)
