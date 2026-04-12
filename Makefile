@@ -42,4 +42,4 @@ dev-down:
 	docker compose -f deploy/docker-compose.dev.yml down -v
 
 test-integration:
-	go test -tags=integration -v -count=1 -timeout=120s ./tests/integration/
+	go test -tags=integration -v -count=1 -timeout=120s ./tests/integration/ ./internal/store/

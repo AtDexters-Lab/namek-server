@@ -22,6 +22,8 @@ coverage.txt
 *.swp
 *.swo
 *~
+.claude
+.codex
 
 # OS
 .DS_Store

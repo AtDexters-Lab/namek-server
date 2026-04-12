@@ -125,6 +125,7 @@ type attestRequest struct {
 	Secret         string                `json:"secret" binding:"required"`
 	Quote          string                `json:"quote" binding:"required"`
 	OSVersion      string                `json:"os_version,omitempty"`
+	HardwareModel  string                `json:"hardware_model,omitempty" binding:"omitempty,max=128"`
 	PCRValues      map[string]string     `json:"pcr_values,omitempty"`
 	RecoveryBundle *attestRecoveryBundle `json:"recovery_bundle,omitempty"`
 }
@@ -184,12 +185,13 @@ func (h *DeviceEnrollHandler) CompleteEnroll(c *gin.Context) {
 	}
 
 	attestReq := service.AttestRequest{
-		Nonce:     req.Nonce,
-		Secret:    secret,
-		QuoteB64:  req.Quote,
-		OSVersion: req.OSVersion,
-		PCRValues: pcrValues,
-		ClientIP:  net.ParseIP(c.ClientIP()),
+		Nonce:         req.Nonce,
+		Secret:        secret,
+		QuoteB64:      req.Quote,
+		OSVersion:     req.OSVersion,
+		HardwareModel: req.HardwareModel,
+		PCRValues:     pcrValues,
+		ClientIP:      net.ParseIP(c.ClientIP()),
 	}
 
 	// Convert handler-level recovery bundle to service-level

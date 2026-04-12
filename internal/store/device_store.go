@@ -35,12 +35,15 @@ func NewDeviceStore(pool *pgxpool.Pool) *DeviceStore {
 
 // host() extracts the bare IP from inet, avoiding CIDR notation (e.g. "1.2.3.4/32")
 // that net.ParseIP cannot parse.
+// coalesce(lan_ips, '{}'::text[]) guarantees non-null TEXT[] so pgx can scan into a
+// plain []string without a nullable-pointer wrapper.
 const deviceColumns = `id, account_id, slug, hostname, custom_hostname, identity_class, ek_fingerprint, ek_cert_der, ak_public_key,
-		       issuer_fingerprint, os_version, pcr_values, trust_level, trust_level_override,
+		       issuer_fingerprint, os_version, hardware_model, pcr_values, trust_level, trust_level_override,
 		       host(ip_address), timezone, status,
 		       hostname_changes_this_year, hostname_year, last_hostname_change_at,
 		       voucher_pending_since,
-		       created_at, last_seen_at`
+		       created_at, last_seen_at,
+		       coalesce(lan_ips, '{}'::text[]), setup_heartbeat_at`
 
 func scanDevice(row pgx.Row) (*model.Device, error) {
 	d := &model.Device{}
@@ -48,11 +51,12 @@ func scanDevice(row pgx.Row) (*model.Device, error) {
 	var pcrValuesJSON []byte
 	err := row.Scan(
 		&d.ID, &d.AccountID, &d.Slug, &d.Hostname, &d.CustomHostname, &d.IdentityClass, &d.EKFingerprint, &d.EKCertDER, &d.AKPublicKey,
-		&d.IssuerFingerprint, &d.OSVersion, &pcrValuesJSON, &d.TrustLevel, &d.TrustLevelOverride,
+		&d.IssuerFingerprint, &d.OSVersion, &d.HardwareModel, &pcrValuesJSON, &d.TrustLevel, &d.TrustLevelOverride,
 		&ipAddr, &d.Timezone, &d.Status,
 		&d.HostnameChangesThisYear, &d.HostnameYear, &d.LastHostnameChangeAt,
 		&d.VoucherPendingSince,
 		&d.CreatedAt, &d.LastSeenAt,
+		&d.LANIPs, &d.SetupHeartbeatAt,
 	)
 	if err != nil {
 		return nil, err
@@ -64,6 +68,13 @@ func scanDevice(row pgx.Row) (*model.Device, error) {
 		_ = json.Unmarshal(pcrValuesJSON, &d.PCRValues)
 	}
 	return d, nil
+}
+
+// SetupDeviceResult is the minimal row shape returned by FindSetupDevicesByPublicIP.
+// Hostname is deliberately omitted to limit CGNAT-neighbour fingerprinting surface.
+type SetupDeviceResult struct {
+	HardwareModel *string
+	LANIPs        []string
 }
 
 func (s *DeviceStore) GetByID(ctx context.Context, id uuid.UUID) (*model.Device, error) {
@@ -352,7 +363,12 @@ func (b *LastSeenBatcher) flushChunk(ctx context.Context, chunk []flushEntry) er
 		fmt.Fprintf(&sb, "($%d::uuid, $%d::timestamptz, $%d::inet)", argBase+1, argBase+2, argBase+3)
 		args = append(args, entry.id, entry.e.timestamp, ipToString(entry.e.ip))
 	}
-	sb.WriteString(") AS v(id, ts, ip) WHERE d.id = v.id")
+	// Monotonic guard: never overwrite a row whose last_seen_at is already newer than this
+	// swapped-batch entry's captured timestamp. Closes the race where the batcher swaps the
+	// pending map at T0 and commits at T1 — without this guard, a heartbeat handler write at
+	// T0.5 (which wrote ip_address + last_seen_at atomically via UpdateSetupHeartbeat) could
+	// be overwritten by the batcher's stale entry.
+	sb.WriteString(") AS v(id, ts, ip) WHERE d.id = v.id AND (d.last_seen_at IS NULL OR v.ts > d.last_seen_at)")
 
 	_, err := b.pool.Exec(ctx, sb.String(), args...)
 	return err
@@ -440,6 +456,102 @@ func (s *DeviceStore) UpdateTrustData(ctx context.Context, id uuid.UUID, identit
 	return nil
 }
 
+// UpdateHardwareModel writes the hardware_model field in isolation. Kept separate from
+// UpdateTrustData so that the operator-facing ClearTrustOverride path (which also calls
+// UpdateTrustData) never needs to carry an unrelated hardware_model parameter.
+func (s *DeviceStore) UpdateHardwareModel(ctx context.Context, id uuid.UUID, hardwareModel *string) error {
+	tag, err := s.pool.Exec(ctx, `UPDATE devices SET hardware_model = $1 WHERE id = $2`, hardwareModel, id)
+	if err != nil {
+		return fmt.Errorf("update hardware model: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrDeviceNotFound
+	}
+	return nil
+}
+
+// UpdateSetupHeartbeatResult reports whether the write actually landed. RowsAffected may be
+// zero if (a) the monotonic CTE guard rejected a late statement under backward clock skew,
+// or (b) the row was deleted/suspended between the auth middleware and the handler. Callers
+// observe this via the SetupDiscover.HeartbeatGuardRejected metric rather than an error.
+type UpdateSetupHeartbeatResult struct {
+	RowsAffected int64
+}
+
+// UpdateSetupHeartbeat writes the heartbeat-mode columns atomically. The
+// handler intentionally does NOT touch last_seen_at — that column is owned
+// exclusively by LastSeenBatcher, which also runs on the heartbeat request
+// (via DeviceTPMAuth middleware). Letting the batcher be the sole writer
+// avoids a cross-clock mixing bug: if Namek's Go time.Now() and the Postgres
+// host clock are out of sync, writing last_seen_at from both sources and
+// then comparing them in a guard can silently drop legitimate heartbeats.
+//
+// Row-level ordering across concurrent heartbeats from the same device is
+// handled by Postgres row-lock serialization — last writer wins, which is
+// the right semantic since a device can only be in one state at a time and
+// retries always carry the most recent LAN IPs. The stale-heartbeat-after-
+// completion risk is documented in the plan as acknowledged risk #7.
+func (s *DeviceStore) UpdateSetupHeartbeat(ctx context.Context, id uuid.UUID, clientIP net.IP, lanIPs []string, setupComplete bool) (UpdateSetupHeartbeatResult, error) {
+	var tag pgconn.CommandTag
+	var err error
+	if setupComplete {
+		tag, err = s.pool.Exec(ctx, `
+			UPDATE devices
+			SET setup_heartbeat_at = NULL,
+			    lan_ips = NULL
+			WHERE id = $1
+		`, id)
+	} else {
+		tag, err = s.pool.Exec(ctx, `
+			UPDATE devices
+			SET setup_heartbeat_at = NOW(),
+			    lan_ips = $2::text[],
+			    ip_address = $3::inet
+			WHERE id = $1
+		`, id, lanIPs, ipToString(clientIP))
+	}
+	if err != nil {
+		return UpdateSetupHeartbeatResult{}, fmt.Errorf("update setup heartbeat: %w", err)
+	}
+	return UpdateSetupHeartbeatResult{RowsAffected: tag.RowsAffected()}, nil
+}
+
+// FindSetupDevicesByPublicIP returns devices currently in setup mode whose last recorded
+// public IP matches the caller's. The partial index idx_devices_setup_discovery makes this
+// query cheap; Postgres's predicate_implied_by recognises that
+//
+//	setup_heartbeat_at > NOW() - interval
+//
+// implies the index's partial predicate `setup_heartbeat_at IS NOT NULL`.
+//
+// The returned row deliberately omits hostname to limit fingerprinting surface on CGNAT.
+func (s *DeviceStore) FindSetupDevicesByPublicIP(ctx context.Context, publicIP net.IP, ttl time.Duration) ([]SetupDeviceResult, error) {
+	if publicIP == nil {
+		return nil, errors.New("nil public ip")
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT hardware_model, coalesce(lan_ips, '{}'::text[])
+		FROM devices
+		WHERE ip_address = $1::inet
+		  AND setup_heartbeat_at > NOW() - make_interval(secs => $2)
+		  AND status = 'active'
+	`, ipToString(publicIP), int(ttl.Seconds()))
+	if err != nil {
+		return nil, fmt.Errorf("find setup devices: %w", err)
+	}
+	defer rows.Close()
+
+	var results []SetupDeviceResult
+	for rows.Next() {
+		var r SetupDeviceResult
+		if err := rows.Scan(&r.HardwareModel, &r.LANIPs); err != nil {
+			return nil, fmt.Errorf("scan setup device: %w", err)
+		}
+		results = append(results, r)
+	}
+	return results, rows.Err()
+}
+
 func pcrValuesToJSON(pcrValues map[string]string) []byte {
 	if pcrValues == nil {
 		return nil
@@ -470,11 +582,11 @@ func isDuplicateKeyError(err error) bool {
 // CreateDevice inserts a device into an existing account.
 func (s *DeviceStore) CreateDevice(ctx context.Context, device *model.Device) error {
 	_, err := s.pool.Exec(ctx, `
-		INSERT INTO devices (id, account_id, slug, hostname, custom_hostname, identity_class, ek_fingerprint, ek_cert_der, ak_public_key, issuer_fingerprint, os_version, pcr_values, trust_level, ip_address, status, last_seen_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, NOW())
+		INSERT INTO devices (id, account_id, slug, hostname, custom_hostname, identity_class, ek_fingerprint, ek_cert_der, ak_public_key, issuer_fingerprint, os_version, hardware_model, pcr_values, trust_level, ip_address, status, last_seen_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, NOW())
 	`, device.ID, device.AccountID, device.Slug, device.Hostname, device.CustomHostname,
 		device.IdentityClass, device.EKFingerprint, device.EKCertDER, device.AKPublicKey,
-		device.IssuerFingerprint, device.OSVersion, pcrValuesToJSON(device.PCRValues), device.TrustLevel,
+		device.IssuerFingerprint, device.OSVersion, device.HardwareModel, pcrValuesToJSON(device.PCRValues), device.TrustLevel,
 		ipToString(device.IPAddress), device.Status)
 	if err != nil {
 		var pgErr *pgconn.PgError
@@ -508,11 +620,11 @@ func CreateDeviceWithAccount(ctx context.Context, pool *pgxpool.Pool, account *m
 	}
 
 	_, err = tx.Exec(ctx, `
-		INSERT INTO devices (id, account_id, slug, hostname, custom_hostname, identity_class, ek_fingerprint, ek_cert_der, ak_public_key, issuer_fingerprint, os_version, pcr_values, trust_level, ip_address, status, last_seen_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, NOW())
+		INSERT INTO devices (id, account_id, slug, hostname, custom_hostname, identity_class, ek_fingerprint, ek_cert_der, ak_public_key, issuer_fingerprint, os_version, hardware_model, pcr_values, trust_level, ip_address, status, last_seen_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, NOW())
 	`, device.ID, device.AccountID, device.Slug, device.Hostname, device.CustomHostname,
 		device.IdentityClass, device.EKFingerprint, device.EKCertDER, device.AKPublicKey,
-		device.IssuerFingerprint, device.OSVersion, pcrValuesToJSON(device.PCRValues), device.TrustLevel,
+		device.IssuerFingerprint, device.OSVersion, device.HardwareModel, pcrValuesToJSON(device.PCRValues), device.TrustLevel,
 		ipToString(device.IPAddress), device.Status)
 	if err != nil {
 		var pgErr *pgconn.PgError
@@ -569,11 +681,11 @@ func CreateDeviceWithRecoveryAccount(ctx context.Context, pool *pgxpool.Pool, ac
 	}
 
 	_, err = tx.Exec(ctx, `
-		INSERT INTO devices (id, account_id, slug, hostname, custom_hostname, identity_class, ek_fingerprint, ek_cert_der, ak_public_key, issuer_fingerprint, os_version, pcr_values, trust_level, ip_address, status, last_seen_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, NOW())
+		INSERT INTO devices (id, account_id, slug, hostname, custom_hostname, identity_class, ek_fingerprint, ek_cert_der, ak_public_key, issuer_fingerprint, os_version, hardware_model, pcr_values, trust_level, ip_address, status, last_seen_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, NOW())
 	`, device.ID, device.AccountID, device.Slug, device.Hostname, device.CustomHostname,
 		device.IdentityClass, device.EKFingerprint, device.EKCertDER, device.AKPublicKey,
-		device.IssuerFingerprint, device.OSVersion, pcrValuesToJSON(device.PCRValues), device.TrustLevel,
+		device.IssuerFingerprint, device.OSVersion, device.HardwareModel, pcrValuesToJSON(device.PCRValues), device.TrustLevel,
 		ipToString(device.IPAddress), device.Status)
 	if err != nil {
 		var pgErr *pgconn.PgError

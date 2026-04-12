@@ -333,9 +333,12 @@ func main() {
 		}
 	}()
 
-	// DNS proxy (when PowerDNS listens on a different port than :53)
+	// DNS proxy (when PowerDNS listens on a different port than :53).
+	// Respect powerDNS.disableProxy for operators who explicitly opt out — dev
+	// hosts with systemd-resolved holding :53 set this to true so `make dev`
+	// works without CAP_NET_BIND_SERVICE or root.
 	var dnsProxy *dns.Proxy
-	if cfg.PowerDNS.DNSAddress != "127.0.0.1:53" && cfg.PowerDNS.DNSAddress != ":53" {
+	if !cfg.PowerDNS.DisableProxy && cfg.PowerDNS.DNSAddress != "127.0.0.1:53" && cfg.PowerDNS.DNSAddress != ":53" {
 		dnsProxy = dns.NewProxy(":53", cfg.PowerDNS.DNSAddress, logger)
 		if err := dnsProxy.Start(ctx); err != nil {
 			logger.Error("failed to start dns proxy", "error", err)

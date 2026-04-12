@@ -279,6 +279,7 @@ type AttestRequest struct {
 	Secret         []byte
 	QuoteB64       string
 	OSVersion      string
+	HardwareModel  string
 	PCRValues      map[int][]byte
 	ClientIP       net.IP
 	RecoveryBundle *RecoveryBundle // optional, for recovery enrollment
@@ -363,6 +364,10 @@ func (s *DeviceService) CompleteEnrollment(ctx context.Context, req AttestReques
 	if req.OSVersion != "" {
 		osVersion = &req.OSVersion
 	}
+	var hardwareModel *string
+	if req.HardwareModel != "" {
+		hardwareModel = &req.HardwareModel
+	}
 
 	// Compute trust level by querying PCR consensus
 	pcrConsensus := s.computePCRConsensus(ctx, pcrValuesJSON, issuerFP, osVersion)
@@ -383,6 +388,13 @@ func (s *DeviceService) CompleteEnrollment(ctx context.Context, req AttestReques
 		// Update trust data on re-enrollment
 		if err := s.deviceStore.UpdateTrustData(ctx, device.ID, identityClass, trustLevel, issuerFP, osVersion, pcrValuesJSON); err != nil {
 			s.logger.Warn("update trust data on re-enrollment failed (non-blocking)", "device_id", device.ID, "error", err)
+		}
+		// Update hardware_model separately — kept out of UpdateTrustData so the
+		// census.go ClearTrustOverride path does not need to carry this unrelated field.
+		if hardwareModel != nil {
+			if err := s.deviceStore.UpdateHardwareModel(ctx, device.ID, hardwareModel); err != nil {
+				s.logger.Warn("update hardware model on re-enrollment failed (non-blocking)", "device_id", device.ID, "error", err)
+			}
 		}
 
 		// Census observation recording (non-blocking, device already exists)
@@ -475,6 +487,7 @@ func (s *DeviceService) CompleteEnrollment(ctx context.Context, req AttestReques
 		AKPublicKey:       pe.AKPubKeyDER,
 		IssuerFingerprint: issuerFP,
 		OSVersion:         osVersion,
+		HardwareModel:     hardwareModel,
 		PCRValues:         pcrValuesJSON,
 		TrustLevel:        trustLevel,
 		IPAddress:         req.ClientIP,

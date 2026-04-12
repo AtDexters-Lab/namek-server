@@ -65,6 +65,8 @@ func NewRouter(deps RouterDeps) http.Handler {
 	verifyH := handler.NewVerifyHandler(deps.TokenSvc)
 	nexusH := handler.NewNexusRegisterHandler(deps.NexusSvc, deps.Logger)
 	acmeH := handler.NewACMEHandler(deps.ACMESvc, deps.Logger)
+	deviceHeartbeatH := handler.NewDeviceHeartbeatHandler(deps.DeviceSvc, deps.Logger)
+	setupDiscoverH := handler.NewSetupDiscoverHandler(deps.DeviceSvc, deps.Config.SetupDiscover.TTL(), deps.Logger)
 
 	// System endpoints (no auth)
 	r.GET("/health", healthH.Health)
@@ -115,6 +117,7 @@ func NewRouter(deps RouterDeps) http.Handler {
 	{
 		deviceAuth.GET("/devices/me", deviceH.GetMe)
 		deviceAuth.PATCH("/devices/me/hostname", deviceH.UpdateHostname)
+		deviceAuth.POST("/devices/me/heartbeat", deviceHeartbeatH.Heartbeat)
 		deviceAuth.POST("/tokens/nexus", tokenH.IssueNexusToken)
 		deviceAuth.POST("/acme/challenges", acmeH.CreateChallenge)
 		deviceAuth.DELETE("/acme/challenges/:id", acmeH.DeleteChallenge)
@@ -141,6 +144,25 @@ func NewRouter(deps RouterDeps) http.Handler {
 			domainRoutes.POST("/:id/assignments", domainH.AssignDomain)
 			domainRoutes.DELETE("/:id/assignments/:device_id", domainH.UnassignDomain)
 		}
+	}
+
+	// Setup discovery: unauthenticated, CORS-gated, rate-limited. CORS runs before
+	// auth.RateLimit so preflight OPTIONS does not consume rate-limit budget.
+	setupRL := v1.Group("/setup")
+	setupRL.Use(auth.SetupDiscoverCORS(deps.Config.SetupDiscover.AllowedOrigins))
+	setupRL.Use(auth.RateLimit(
+		deps.Config.SetupDiscover.RateLimitPerSecond,
+		deps.Config.SetupDiscover.BurstPerSecond,
+		deps.Config.SetupDiscover.RateLimitPerIPPerSecond,
+		deps.Config.SetupDiscover.BurstPerIPPerSecond,
+	))
+	{
+		setupRL.GET("/discover", setupDiscoverH.Discover)
+		// The OPTIONS route is registered so the group middleware chain runs for
+		// preflight. The handler body is unreachable — SetupDiscoverCORS aborts with
+		// 204 before reaching it. Do not delete this route even though the handler
+		// looks dead.
+		setupRL.OPTIONS("/discover", func(c *gin.Context) {})
 	}
 
 	// Load Nexus client CA: explicit file if configured, otherwise system cert pool.

@@ -8,7 +8,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const currentVersion = 4
+const currentVersion = 5
 
 var migrations = []string{
 	// Version 1: Consolidated schema (original + ACME certs + backend port + RFC 004 stateless resilience)
@@ -248,6 +248,14 @@ var migrations = []string{
 	// Required for multi-SAN certs where wildcard + base domain share the same _acme-challenge FQDN.
 	`ALTER TABLE acme_challenges DROP CONSTRAINT IF EXISTS acme_challenges_device_id_fqdn_key;
 	 CREATE UNIQUE INDEX acme_challenges_device_fqdn_digest ON acme_challenges(device_id, fqdn, key_authorization);`,
+
+	// Version 5: Setup discovery fallback — hardware model, reported LAN IPs, setup heartbeat timestamp.
+	// Partial index supports the public-IP-matching discover query; only setup-mode devices are indexed.
+	`ALTER TABLE devices ADD COLUMN IF NOT EXISTS hardware_model TEXT;
+	 ALTER TABLE devices ADD COLUMN IF NOT EXISTS lan_ips TEXT[];
+	 ALTER TABLE devices ADD COLUMN IF NOT EXISTS setup_heartbeat_at TIMESTAMPTZ;
+	 CREATE INDEX IF NOT EXISTS idx_devices_setup_discovery
+	     ON devices(ip_address) WHERE setup_heartbeat_at IS NOT NULL;`,
 }
 
 func Migrate(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger) error {

@@ -84,3 +84,13 @@ type VerifyResult struct {
 	Valid bool   `json:"valid"`
 	Error string `json:"error,omitempty"`
 }
+
+// HeartbeatRequest is the body posted to POST /api/v1/devices/me/heartbeat.
+// Devices in first-time setup mode submit their LAN IPs so that
+// piccolospace.com/setup can surface them to a caller on the same public IP.
+// LANIPs must be in private ranges (RFC1918 / RFC4193 / RFC6598) — the server
+// rejects public, link-local, loopback, multicast, and unspecified addresses.
+type HeartbeatRequest struct {
+	LANIPs        []string `json:"lan_ips"`
+	SetupComplete bool     `json:"setup_complete"`
+}

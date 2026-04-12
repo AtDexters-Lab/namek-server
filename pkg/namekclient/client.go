@@ -25,6 +25,7 @@ type Client struct {
 	httpClient       *http.Client
 	tpm              tpmdevice.Device
 	deviceID         string
+	hardwareModel    string // optional; included in enroll attest body when non-empty
 	retry            *retryConfig
 	limiter          *clientLimiter    // optional; nil means no client-side rate limiting
 	reconnectJitter  time.Duration     // max jitter before first request after failure; 0 = disabled
@@ -50,9 +51,26 @@ func WithInsecureSkipVerify() Option {
 	}
 }
 
-// WithHTTPClient sets a custom HTTP client.
+// WithHTTPClient sets a custom HTTP client. If the caller-provided client does
+// not already install a CheckRedirect policy, we take a shallow copy and install
+// the reject-all policy on the copy — this preserves the POST-body-drop protection
+// that New() sets by default without mutating a (potentially shared) caller-owned
+// http.Client. Callers that genuinely want to follow redirects must set their own
+// CheckRedirect on the client they pass in.
 func WithHTTPClient(hc *http.Client) Option {
 	return func(c *Client) {
+		if hc == nil {
+			c.httpClient = hc
+			return
+		}
+		if hc.CheckRedirect == nil {
+			clone := *hc
+			clone.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+				return http.ErrUseLastResponse
+			}
+			c.httpClient = &clone
+			return
+		}
 		c.httpClient = hc
 	}
 }
@@ -104,14 +122,33 @@ func WithReconnectJitter(maxDelay time.Duration) Option {
 	}
 }
 
+// WithHardwareModel sets the hardware model string to include in the enrollment
+// attest body. When non-empty, it flows through both Enroll and EnrollWithRecovery
+// as the optional `hardware_model` field. The server caps this at 128 chars.
+func WithHardwareModel(model string) Option {
+	return func(c *Client) {
+		c.hardwareModel = model
+	}
+}
+
 // New creates a namekclient that uses the given TPM device for attestation.
 func New(baseURL string, tpm tpmdevice.Device, opts ...Option) *Client {
 	rc := defaultRetry
 	c := &Client{
-		baseURL:    baseURL,
-		httpClient: &http.Client{Timeout: 30 * time.Second},
-		tpm:        tpm,
-		retry:      &rc,
+		baseURL: baseURL,
+		httpClient: &http.Client{
+			Timeout: 30 * time.Second,
+			// Reject any redirect by default. Go's stock client follows 301/302 and
+			// on POST→redirect→GET it silently strips the request body — which would
+			// turn heartbeat and authenticated-POST bodies into empty requests against
+			// a confused downstream. Callers that override via WithHTTPClient should
+			// install their own CheckRedirect if they want redirect-following.
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
+		tpm:   tpm,
+		retry: &rc,
 	}
 	for _, o := range opts {
 		o(c)
@@ -247,6 +284,9 @@ func (c *Client) Enroll(ctx context.Context) (*EnrollResult, error) {
 		"secret": base64.StdEncoding.EncodeToString(p1.secret),
 		"quote":  p1.quoteB64,
 	}
+	if c.hardwareModel != "" {
+		attestBody["hardware_model"] = c.hardwareModel
+	}
 	var completeResp enrollCompleteResponse
 	if err := c.doJSON(ctx, http.MethodPost, "/api/v1/devices/enroll/attest", attestBody, &completeResp); err != nil {
 		return nil, fmt.Errorf("complete enroll: %w", err)
@@ -283,6 +323,9 @@ func (c *Client) EnrollWithRecovery(ctx context.Context, bundle *RecoveryBundleI
 		"nonce":  p1.nonce,
 		"secret": base64.StdEncoding.EncodeToString(p1.secret),
 		"quote":  p1.quoteB64,
+	}
+	if c.hardwareModel != "" {
+		attestBody["hardware_model"] = c.hardwareModel
 	}
 
 	if bundle != nil {
@@ -346,6 +389,21 @@ func (c *Client) GetDeviceInfo(ctx context.Context) (*DeviceInfo, error) {
 func (c *Client) SetHostname(ctx context.Context, hostname string) error {
 	body := map[string]string{"custom_hostname": hostname}
 	resp, err := c.doAuthenticated(ctx, http.MethodPatch, "/api/v1/devices/me/hostname", body)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	return nil
+}
+
+// SendHeartbeat calls POST /api/v1/devices/me/heartbeat (authenticated). Used by
+// devices in first-time setup mode to advertise their LAN IPs so that
+// piccolospace.com/setup can surface them to a caller on the same public IP.
+// Devices must submit only private-range LAN IPs; the server rejects public
+// addresses, link-local (closes the 169.254.169.254 IMDS variant), loopback,
+// multicast, and unspecified. 204 on success.
+func (c *Client) SendHeartbeat(ctx context.Context, req *HeartbeatRequest) error {
+	resp, err := c.doAuthenticated(ctx, http.MethodPost, "/api/v1/devices/me/heartbeat", req)
 	if err != nil {
 		return err
 	}

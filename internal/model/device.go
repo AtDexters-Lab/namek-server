@@ -27,12 +27,16 @@ type Device struct {
 	AKPublicKey    []byte       `json:"-"`
 	IssuerFingerprint *string           `json:"issuer_fingerprint,omitempty"`
 	OSVersion         *string           `json:"os_version,omitempty"`
+	HardwareModel     *string           `json:"hardware_model,omitempty"`
 	PCRValues         map[string]string `json:"pcr_values,omitempty"`
 	TrustLevel        TrustLevel        `json:"trust_level"`
 	TrustLevelOverride *TrustLevel      `json:"trust_level_override,omitempty"`
 	IPAddress         net.IP            `json:"ip_address,omitempty"`
 	Timezone          *string           `json:"timezone,omitempty"`
 	Status            DeviceStatus      `json:"status"`
+
+	LANIPs           []string   `json:"lan_ips,omitempty"`
+	SetupHeartbeatAt *time.Time `json:"setup_heartbeat_at,omitempty"`
 
 	HostnameChangesThisYear int        `json:"-"`
 	HostnameYear            int        `json:"-"`

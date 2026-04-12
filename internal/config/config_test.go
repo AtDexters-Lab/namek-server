@@ -44,6 +44,93 @@ nexus:
 	if len(cfg.DNS.Nameservers) != 1 || cfg.DNS.Nameservers[0] != "namek.test.com" {
 		t.Errorf("dns.nameservers default = %v, want [namek.test.com]", cfg.DNS.Nameservers)
 	}
+
+	// Setup-discover defaults are sized for polling cadence, not enrollment.
+	if cfg.SetupDiscover.RateLimitPerSecond != 500 {
+		t.Errorf("setupDiscover.rateLimitPerSecond default = %d, want 500", cfg.SetupDiscover.RateLimitPerSecond)
+	}
+	if cfg.SetupDiscover.RateLimitPerIPPerSecond != 10 {
+		t.Errorf("setupDiscover.rateLimitPerIPPerSecond default = %d, want 10", cfg.SetupDiscover.RateLimitPerIPPerSecond)
+	}
+	if cfg.SetupDiscover.BurstPerIPPerSecond != 30 {
+		t.Errorf("setupDiscover.burstPerIPPerSecond default = %d, want 30", cfg.SetupDiscover.BurstPerIPPerSecond)
+	}
+	if cfg.SetupDiscover.TTLSeconds != 120 {
+		t.Errorf("setupDiscover.ttlSeconds default = %d, want 120", cfg.SetupDiscover.TTLSeconds)
+	}
+	if cfg.SetupDiscover.TTL().Seconds() != 120 {
+		t.Errorf("setupDiscover.TTL() = %v, want 120s", cfg.SetupDiscover.TTL())
+	}
+	wantOrigins := []string{"https://piccolospace.com", "https://www.piccolospace.com"}
+	if len(cfg.SetupDiscover.AllowedOrigins) != len(wantOrigins) {
+		t.Errorf("setupDiscover.allowedOrigins default len = %d, want %d", len(cfg.SetupDiscover.AllowedOrigins), len(wantOrigins))
+	}
+	for i, o := range wantOrigins {
+		if i >= len(cfg.SetupDiscover.AllowedOrigins) || cfg.SetupDiscover.AllowedOrigins[i] != o {
+			t.Errorf("setupDiscover.allowedOrigins[%d] = %q, want %q", i, cfg.SetupDiscover.AllowedOrigins[i], o)
+		}
+	}
+}
+
+func TestLoad_SetupDiscoverValidation(t *testing.T) {
+	// A negative TTL should be rejected by validate().
+	content := `
+publicHostname: "namek.test.com"
+database:
+  url: "postgres://test:test@localhost/test"
+dns:
+  baseDomain: "test.com"
+  zone: "test.com."
+  relayHostname: "relay.test.com"
+powerDNS:
+  apiURL: "http://localhost:8081"
+  apiKey: "test-key"
+nexus:
+  trustedDomainSuffixes: [".nexus.test.com"]
+setupDiscover:
+  ttlSeconds: -1
+`
+	path := writeTemp(t, content)
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected validation error for negative setupDiscover.ttlSeconds")
+	}
+}
+
+func TestLoad_SetupDiscoverOperatorOverride(t *testing.T) {
+	content := `
+publicHostname: "namek.test.com"
+database:
+  url: "postgres://test:test@localhost/test"
+dns:
+  baseDomain: "test.com"
+  zone: "test.com."
+  relayHostname: "relay.test.com"
+powerDNS:
+  apiURL: "http://localhost:8081"
+  apiKey: "test-key"
+nexus:
+  trustedDomainSuffixes: [".nexus.test.com"]
+setupDiscover:
+  rateLimitPerIPPerSecond: 25
+  burstPerIPPerSecond: 75
+  ttlSeconds: 240
+  allowedOrigins:
+    - "https://staging.piccolospace.com"
+`
+	path := writeTemp(t, content)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.SetupDiscover.RateLimitPerIPPerSecond != 25 {
+		t.Errorf("override RateLimitPerIPPerSecond = %d, want 25", cfg.SetupDiscover.RateLimitPerIPPerSecond)
+	}
+	if cfg.SetupDiscover.TTLSeconds != 240 {
+		t.Errorf("override TTLSeconds = %d, want 240", cfg.SetupDiscover.TTLSeconds)
+	}
+	if len(cfg.SetupDiscover.AllowedOrigins) != 1 || cfg.SetupDiscover.AllowedOrigins[0] != "https://staging.piccolospace.com" {
+		t.Errorf("override AllowedOrigins = %v, want [staging]", cfg.SetupDiscover.AllowedOrigins)
+	}
 }
 
 func TestLoad_MissingRequired(t *testing.T) {

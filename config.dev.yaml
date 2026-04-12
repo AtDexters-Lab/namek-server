@@ -17,6 +17,10 @@ powerDNS:
   apiURL: "http://localhost:8181"
   apiKey: "pdns-dev-key"
   dnsAddress: "127.0.0.1:5354"
+  # Skip the :53 bridge proxy. Local dev hosts commonly have systemd-resolved
+  # holding :53, and Pebble's PEBBLE_VA_ALWAYS_VALID=1 means ACME challenges
+  # don't actually need to be resolvable.
+  disableProxy: true
 
 tpm:
   allowSoftwareTPM: true

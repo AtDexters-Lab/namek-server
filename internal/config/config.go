@@ -26,6 +26,7 @@ type Config struct {
 	Enrollment      EnrollmentConfig      `yaml:"enrollment"`
 	Nonce           NonceConfig           `yaml:"nonce"`
 	DeviceRateLimit DeviceRateLimitConfig `yaml:"deviceRateLimit"`
+	SetupDiscover   SetupDiscoverConfig   `yaml:"setupDiscover"`
 	Hostname        HostnameConfig        `yaml:"hostname"`
 	AliasDomain  AliasDomainConfig  `yaml:"aliasDomain"`
 	Recovery     RecoveryConfig     `yaml:"recovery"`
@@ -54,6 +55,13 @@ type PowerDNSConfig struct {
 	ServerID       string `yaml:"serverID"`
 	TimeoutSeconds int    `yaml:"timeoutSeconds"`
 	DNSAddress     string `yaml:"dnsAddress"`
+	// DisableProxy skips the embedded ":53" DNS proxy even when PowerDNS is on
+	// a non-standard port. Useful for dev hosts where systemd-resolved already
+	// holds port 53 and the operator does not need the bridge (e.g. local test
+	// loops where Pebble runs with PEBBLE_VA_ALWAYS_VALID=1 and never actually
+	// resolves challenge records). Production deployments should leave this
+	// false so the proxy runs under root / CAP_NET_BIND_SERVICE.
+	DisableProxy bool `yaml:"disableProxy,omitempty"`
 }
 
 func (c PowerDNSConfig) Timeout() time.Duration {
@@ -119,6 +127,24 @@ type DeviceRateLimitConfig struct {
 	MutationBurst  int `yaml:"mutationBurst"`
 	ReadPerMin     int `yaml:"readPerMin"`
 	ReadBurst      int `yaml:"readBurst"`
+}
+
+// SetupDiscoverConfig tunes the unauthenticated /api/v1/setup/discover endpoint.
+// Defaults are sized for polling (3s cadence) rather than one-shot enrollment —
+// enrollment's 1 rps per-IP limit is too tight to support CGNAT-shared setup flows.
+type SetupDiscoverConfig struct {
+	RateLimitPerSecond      int      `yaml:"rateLimitPerSecond"`
+	BurstPerSecond          int      `yaml:"burstPerSecond"`
+	RateLimitPerIPPerSecond int      `yaml:"rateLimitPerIPPerSecond"`
+	BurstPerIPPerSecond     int      `yaml:"burstPerIPPerSecond"`
+	AllowedOrigins          []string `yaml:"allowedOrigins"`
+	TTLSeconds              int      `yaml:"ttlSeconds"`
+}
+
+// TTL returns the setup-heartbeat TTL as a time.Duration. Devices older than
+// this TTL drop out of discover results.
+func (c SetupDiscoverConfig) TTL() time.Duration {
+	return time.Duration(c.TTLSeconds) * time.Second
 }
 
 type HostnameConfig struct {
@@ -256,6 +282,25 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Nonce.BurstPerIPPerSecond == 0 {
 		c.Nonce.BurstPerIPPerSecond = 100
+	}
+	// Setup-discover defaults — sized for 3s polling under CGNAT, not for one-shot enrollment.
+	if c.SetupDiscover.RateLimitPerSecond == 0 {
+		c.SetupDiscover.RateLimitPerSecond = 500
+	}
+	if c.SetupDiscover.BurstPerSecond == 0 {
+		c.SetupDiscover.BurstPerSecond = 1000
+	}
+	if c.SetupDiscover.RateLimitPerIPPerSecond == 0 {
+		c.SetupDiscover.RateLimitPerIPPerSecond = 10
+	}
+	if c.SetupDiscover.BurstPerIPPerSecond == 0 {
+		c.SetupDiscover.BurstPerIPPerSecond = 30
+	}
+	if len(c.SetupDiscover.AllowedOrigins) == 0 {
+		c.SetupDiscover.AllowedOrigins = []string{"https://piccolospace.com", "https://www.piccolospace.com"}
+	}
+	if c.SetupDiscover.TTLSeconds == 0 {
+		c.SetupDiscover.TTLSeconds = 120
 	}
 	// Device rate limit defaults
 	if c.DeviceRateLimit.MutationPerMin == 0 {
@@ -421,6 +466,22 @@ func (c *Config) validate() error {
 	}
 	if c.Nonce.BurstPerIPPerSecond <= 0 {
 		return fmt.Errorf("nonce.burstPerIP must be positive")
+	}
+	// Setup-discover validation
+	if c.SetupDiscover.RateLimitPerSecond <= 0 {
+		return fmt.Errorf("setupDiscover.rateLimitPerSecond must be positive")
+	}
+	if c.SetupDiscover.BurstPerSecond <= 0 {
+		return fmt.Errorf("setupDiscover.burstPerSecond must be positive")
+	}
+	if c.SetupDiscover.RateLimitPerIPPerSecond <= 0 {
+		return fmt.Errorf("setupDiscover.rateLimitPerIPPerSecond must be positive")
+	}
+	if c.SetupDiscover.BurstPerIPPerSecond <= 0 {
+		return fmt.Errorf("setupDiscover.burstPerIPPerSecond must be positive")
+	}
+	if c.SetupDiscover.TTLSeconds <= 0 {
+		return fmt.Errorf("setupDiscover.ttlSeconds must be positive")
 	}
 	// Device rate limit validation
 	if c.DeviceRateLimit.MutationPerMin <= 0 {

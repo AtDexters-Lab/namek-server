@@ -15,16 +15,17 @@ func Get() *Collector { return global }
 type Collector struct {
 	StartedAt time.Time
 
-	HTTP      HTTPMetrics
-	RateLimit RateLimitMetrics
-	Enroll    EnrollMetrics
-	Nonce     NonceMetrics
-	DNS       DNSMetrics
-	ACME      ACMEMetrics
-	LastSeen  LastSeenMetrics
-	Census    CensusMetrics
-	Nexus     NexusMetrics
-	Recovery  RecoveryMetrics
+	HTTP          HTTPMetrics
+	RateLimit     RateLimitMetrics
+	Enroll        EnrollMetrics
+	Nonce         NonceMetrics
+	DNS           DNSMetrics
+	ACME          ACMEMetrics
+	LastSeen      LastSeenMetrics
+	Census        CensusMetrics
+	Nexus         NexusMetrics
+	Recovery      RecoveryMetrics
+	SetupDiscover SetupDiscoverMetrics
 }
 
 // NewCollector creates a fresh collector with StartedAt set to now.
@@ -103,6 +104,13 @@ type RecoveryMetrics struct {
 	AccountsDissolved atomic.Int64
 }
 
+type SetupDiscoverMetrics struct {
+	Matched                atomic.Int64
+	NoMatch                atomic.Int64
+	Errors                 atomic.Int64
+	HeartbeatGuardRejected atomic.Int64
+}
+
 // Snapshot returns a JSON-serializable copy of all current counter values.
 func (c *Collector) Snapshot() Snapshot {
 	return Snapshot{
@@ -164,22 +172,29 @@ func (c *Collector) Snapshot() Snapshot {
 			CapacityRejected: c.Nonce.CapacityRejected.Load(),
 			ConsumeNotFound:  c.Nonce.ConsumeNotFound.Load(),
 		},
+		SetupDiscover: SetupDiscoverSnapshot{
+			Matched:                c.SetupDiscover.Matched.Load(),
+			NoMatch:                c.SetupDiscover.NoMatch.Load(),
+			Errors:                 c.SetupDiscover.Errors.Load(),
+			HeartbeatGuardRejected: c.SetupDiscover.HeartbeatGuardRejected.Load(),
+		},
 	}
 }
 
 // Snapshot types — JSON-serializable copies of counter values.
 
 type Snapshot struct {
-	HTTP       HTTPSnapshot      `json:"http"`
-	RateLimit  RateLimitSnapshot `json:"rate_limit"`
-	Enrollment EnrollSnapshot    `json:"enrollment"`
-	DNS        DNSSnapshot       `json:"dns"`
-	ACME       ACMESnapshot      `json:"acme"`
-	LastSeen   LastSeenSnapshot  `json:"last_seen"`
-	Census     CensusSnapshot    `json:"census"`
-	Nexus      NexusSnapshot     `json:"nexus"`
-	Recovery   RecoverySnapshot  `json:"recovery"`
-	Nonce      NonceSnapshot     `json:"nonce"`
+	HTTP          HTTPSnapshot          `json:"http"`
+	RateLimit     RateLimitSnapshot     `json:"rate_limit"`
+	Enrollment    EnrollSnapshot        `json:"enrollment"`
+	DNS           DNSSnapshot           `json:"dns"`
+	ACME          ACMESnapshot          `json:"acme"`
+	LastSeen      LastSeenSnapshot      `json:"last_seen"`
+	Census        CensusSnapshot        `json:"census"`
+	Nexus         NexusSnapshot         `json:"nexus"`
+	Recovery      RecoverySnapshot      `json:"recovery"`
+	Nonce         NonceSnapshot         `json:"nonce"`
+	SetupDiscover SetupDiscoverSnapshot `json:"setup_discover"`
 }
 
 type HTTPSnapshot struct {
@@ -248,4 +263,11 @@ type RecoverySnapshot struct {
 type NonceSnapshot struct {
 	CapacityRejected int64 `json:"capacity_rejected"`
 	ConsumeNotFound  int64 `json:"consume_not_found"`
+}
+
+type SetupDiscoverSnapshot struct {
+	Matched                int64 `json:"matched"`
+	NoMatch                int64 `json:"no_match"`
+	Errors                 int64 `json:"errors"`
+	HeartbeatGuardRejected int64 `json:"heartbeat_guard_rejected"`
 }
