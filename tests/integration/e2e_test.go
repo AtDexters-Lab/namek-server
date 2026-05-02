@@ -4,6 +4,8 @@ package integration
 
 import (
 	"context"
+	"crypto/rand"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -33,7 +35,7 @@ func TestFullFlow(t *testing.T) {
 	dbURL := envOr("NAMEK_TEST_DB", "postgres://namek:namek@localhost:5432/namek?sslmode=disable")
 	conn, err := pgx.Connect(ctx, dbURL)
 	require.NoError(t, err, "connect to DB for cleanup")
-	_, err = conn.Exec(ctx, "DELETE FROM audit_log; DELETE FROM device_domain_assignments; DELETE FROM account_domains; DELETE FROM acme_challenges; DELETE FROM released_hostnames; DELETE FROM devices; DELETE FROM accounts")
+	_, err = conn.Exec(ctx, "DELETE FROM audit_log; DELETE FROM device_domain_assignments; DELETE FROM account_domains; DELETE FROM acme_challenges; DELETE FROM unlock_escrows; DELETE FROM released_hostnames; DELETE FROM devices; DELETE FROM accounts")
 	require.NoError(t, err, "clean DB")
 	conn.Close(ctx)
 
@@ -153,4 +155,159 @@ func TestFullFlow(t *testing.T) {
 	assert.Equal(t, result.DeviceID, client2.DeviceID())
 
 	tpm2dev.Close()
+}
+
+// TestUnlockEscrow covers the per-device singleton escrow that holds the
+// auto-unlock secret F. The dev config sets cleanupIntervalSeconds=5 so the
+// sweep scenario doesn't have to wait minutes.
+func TestUnlockEscrow(t *testing.T) {
+	ctx := context.Background()
+
+	dbURL := envOr("NAMEK_TEST_DB", "postgres://namek:namek@localhost:5432/namek?sslmode=disable")
+	conn, err := pgx.Connect(ctx, dbURL)
+	require.NoError(t, err, "connect to DB for cleanup")
+	_, err = conn.Exec(ctx, "DELETE FROM audit_log; DELETE FROM unlock_escrows; DELETE FROM devices; DELETE FROM accounts")
+	require.NoError(t, err, "clean DB")
+	defer conn.Close(ctx)
+
+	rootDir, err := filepath.Abs("../..")
+	require.NoError(t, err)
+	stateDir := filepath.Join(rootDir, ".local", "swtpm")
+
+	proc, err := swtpm.Start(ctx, stateDir)
+	require.NoError(t, err, "swtpm start failed")
+	defer proc.Stop()
+
+	tpm, err := tpmdevice.Open(ctx, proc.Addr())
+	require.NoError(t, err)
+	defer tpm.Close()
+
+	serverURL := envOr("NAMEK_TEST_URL", "https://localhost:8443")
+	client := namekclient.New(serverURL, tpm, namekclient.WithInsecureSkipVerify())
+
+	require.Eventually(t, func() bool {
+		return client.Ready(ctx) == nil
+	}, 30*time.Second, 1*time.Second, "server not ready")
+
+	enroll, err := client.Enroll(ctx)
+	require.NoError(t, err)
+	deviceID := enroll.DeviceID
+
+	// Helper: count audit rows for this device with the given action.
+	countAudit := func(action string) int {
+		var n int
+		err := conn.QueryRow(ctx,
+			`SELECT COUNT(*) FROM audit_log WHERE actor_id = $1 AND action = $2`,
+			deviceID, action,
+		).Scan(&n)
+		require.NoError(t, err)
+		return n
+	}
+	// Helper: count system-actor sweep audit rows for this device.
+	countSweepAudit := func(action string) int {
+		var n int
+		err := conn.QueryRow(ctx,
+			`SELECT COUNT(*) FROM audit_log WHERE resource_id = $1 AND action = $2`,
+			deviceID, action,
+		).Scan(&n)
+		require.NoError(t, err)
+		return n
+	}
+
+	// Scenario 1: deposit with requested window above the ceiling, pickup
+	// twice (idempotent, second pickup must NOT emit audit), revoke twice
+	// (second revoke is a no-op and must NOT emit audit), then GET expects 404.
+	t.Run("deposit_pickup_revoke_idempotent", func(t *testing.T) {
+		secret := make([]byte, 32)
+		_, err := rand.Read(secret)
+		require.NoError(t, err)
+
+		// requested 1800s; dev config ceiling is 600s — expect clamp.
+		dep, err := client.DepositUnlockEscrow(ctx, secret, 1800)
+		require.NoError(t, err)
+		assert.True(t, dep.RequestedClamped, "1800s > 600s ceiling should clamp")
+		assert.Equal(t, 600, dep.EffectiveWindowSeconds)
+		assert.NotEmpty(t, dep.ExpiresAt)
+		assert.Equal(t, 1, countAudit("auto_unlock.escrow.deposited"))
+
+		// First pickup — should win the CTE UPDATE arm and emit audit.
+		pick1, err := client.PickupUnlockEscrow(ctx)
+		require.NoError(t, err)
+		assert.NotEmpty(t, pick1.Secret)
+		assert.Equal(t, 1, countAudit("auto_unlock.escrow.picked_up"))
+
+		// Second pickup — fall-through SELECT arm, same secret, NO new audit.
+		pick2, err := client.PickupUnlockEscrow(ctx)
+		require.NoError(t, err)
+		assert.Equal(t, pick1.Secret, pick2.Secret, "idempotent pickup should return same secret")
+		assert.Equal(t, 1, countAudit("auto_unlock.escrow.picked_up"), "retry must not emit additional audit")
+
+		// First revoke — actually deletes the row, emits audit.
+		require.NoError(t, client.RevokeUnlockEscrow(ctx))
+		assert.Equal(t, 1, countAudit("auto_unlock.escrow.revoked"))
+
+		// Second revoke — no-op (row already gone), must NOT emit audit.
+		require.NoError(t, client.RevokeUnlockEscrow(ctx))
+		assert.Equal(t, 1, countAudit("auto_unlock.escrow.revoked"), "no-op revoke must not emit audit")
+
+		// Pickup after revoke → ErrEscrowNotFound (404).
+		_, err = client.PickupUnlockEscrow(ctx)
+		require.Error(t, err)
+		assert.True(t, errors.Is(err, namekclient.ErrEscrowNotFound), "expected ErrEscrowNotFound, got %v", err)
+	})
+
+	// Scenario 2: short window, sleep past expiry, pickup must return 404
+	// via the lazy-expiry filter (without waiting for the sweep).
+	t.Run("lazy_expiry_filter", func(t *testing.T) {
+		// Reset state — prior scenario left no escrow row but wipes deposit count.
+		_, err := conn.Exec(ctx, `DELETE FROM unlock_escrows WHERE device_id = $1`, deviceID)
+		require.NoError(t, err)
+
+		secret := make([]byte, 32)
+		_, err = rand.Read(secret)
+		require.NoError(t, err)
+
+		_, err = client.DepositUnlockEscrow(ctx, secret, 1)
+		require.NoError(t, err)
+
+		time.Sleep(2 * time.Second)
+
+		_, err = client.PickupUnlockEscrow(ctx)
+		require.Error(t, err)
+		assert.True(t, errors.Is(err, namekclient.ErrEscrowNotFound), "expected ErrEscrowNotFound, got %v", err)
+	})
+
+	// Scenario 3: deposit a row, force its expires_at into the past via SQL,
+	// wait for the sweep tick (dev config: 5 s), assert the row is gone and a
+	// per-device escrow.expired audit entry was emitted.
+	t.Run("sweep_per_device_audit", func(t *testing.T) {
+		_, err := conn.Exec(ctx, `DELETE FROM unlock_escrows WHERE device_id = $1`, deviceID)
+		require.NoError(t, err)
+		// Reset prior expired-audit counts so the assertion is per-scenario.
+		_, err = conn.Exec(ctx, `DELETE FROM audit_log WHERE action = 'auto_unlock.escrow.expired' AND resource_id = $1`, deviceID)
+		require.NoError(t, err)
+
+		secret := make([]byte, 32)
+		_, err = rand.Read(secret)
+		require.NoError(t, err)
+
+		_, err = client.DepositUnlockEscrow(ctx, secret, 60)
+		require.NoError(t, err)
+
+		// Force the row into the past. pgx coerces the UUID-shaped string.
+		_, err = conn.Exec(ctx,
+			`UPDATE unlock_escrows SET expires_at = NOW() - INTERVAL '1 minute' WHERE device_id = $1`,
+			deviceID,
+		)
+		require.NoError(t, err)
+
+		// Dev config sweeps every 5 s; allow up to 15 s for the next tick.
+		require.Eventually(t, func() bool {
+			var n int
+			_ = conn.QueryRow(ctx, `SELECT COUNT(*) FROM unlock_escrows WHERE device_id = $1`, deviceID).Scan(&n)
+			return n == 0
+		}, 15*time.Second, 500*time.Millisecond, "sweep should remove expired row")
+
+		assert.Equal(t, 1, countSweepAudit("auto_unlock.escrow.expired"))
+	})
 }

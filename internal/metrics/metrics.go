@@ -10,22 +10,27 @@ var global = NewCollector()
 // Get returns the global metrics collector.
 func Get() *Collector { return global }
 
-// Collector holds all operational metrics as atomic counters.
-// Counters are monotonic from process start and reset on restart.
+// Collector holds all operational metrics.
+// Counters live in *Metrics sub-structs and are monotonic from process start
+// (reset on restart). Gauges live in *Gauges sub-structs and are overwritten —
+// mixing the two in the same sub-struct violates the convention that downstream
+// exporters rely on.
 type Collector struct {
 	StartedAt time.Time
 
-	HTTP          HTTPMetrics
-	RateLimit     RateLimitMetrics
-	Enroll        EnrollMetrics
-	Nonce         NonceMetrics
-	DNS           DNSMetrics
-	ACME          ACMEMetrics
-	LastSeen      LastSeenMetrics
-	Census        CensusMetrics
-	Nexus         NexusMetrics
-	Recovery      RecoveryMetrics
-	SetupDiscover SetupDiscoverMetrics
+	HTTP             HTTPMetrics
+	RateLimit        RateLimitMetrics
+	Enroll           EnrollMetrics
+	Nonce            NonceMetrics
+	DNS              DNSMetrics
+	ACME             ACMEMetrics
+	LastSeen         LastSeenMetrics
+	Census           CensusMetrics
+	Nexus            NexusMetrics
+	Recovery         RecoveryMetrics
+	SetupDiscover    SetupDiscoverMetrics
+	AutoUnlock       AutoUnlockMetrics
+	AutoUnlockGauges AutoUnlockGauges
 }
 
 // NewCollector creates a fresh collector with StartedAt set to now.
@@ -111,6 +116,24 @@ type SetupDiscoverMetrics struct {
 	HeartbeatGuardRejected atomic.Int64
 }
 
+// AutoUnlockMetrics — monotonic counters for the auto-unlock escrow service.
+// DepositedReplaced and DepositedClamped are SUBSETS of Deposited (a single
+// deposit can increment both); do not sum them as peers in dashboards.
+type AutoUnlockMetrics struct {
+	Deposited         atomic.Int64
+	DepositedReplaced atomic.Int64 // subset of Deposited
+	DepositedClamped  atomic.Int64 // subset of Deposited
+	PickedUp          atomic.Int64
+	Revoked           atomic.Int64
+	Expired           atomic.Int64
+}
+
+// AutoUnlockGauges — overwritten on each sweep tick, NOT monotonic. Held in a
+// sibling struct so the Collector "monotonic counters" contract stays intact.
+type AutoUnlockGauges struct {
+	OldestExpiredAgeSeconds atomic.Int64 // gauge sampled at each sweep tick start
+}
+
 // Snapshot returns a JSON-serializable copy of all current counter values.
 func (c *Collector) Snapshot() Snapshot {
 	return Snapshot{
@@ -178,23 +201,36 @@ func (c *Collector) Snapshot() Snapshot {
 			Errors:                 c.SetupDiscover.Errors.Load(),
 			HeartbeatGuardRejected: c.SetupDiscover.HeartbeatGuardRejected.Load(),
 		},
+		AutoUnlock: AutoUnlockSnapshot{
+			Deposited:         c.AutoUnlock.Deposited.Load(),
+			DepositedReplaced: c.AutoUnlock.DepositedReplaced.Load(),
+			DepositedClamped:  c.AutoUnlock.DepositedClamped.Load(),
+			PickedUp:          c.AutoUnlock.PickedUp.Load(),
+			Revoked:           c.AutoUnlock.Revoked.Load(),
+			Expired:           c.AutoUnlock.Expired.Load(),
+		},
+		AutoUnlockGauges: AutoUnlockGaugesSnapshot{
+			OldestExpiredAgeSeconds: c.AutoUnlockGauges.OldestExpiredAgeSeconds.Load(),
+		},
 	}
 }
 
 // Snapshot types — JSON-serializable copies of counter values.
 
 type Snapshot struct {
-	HTTP          HTTPSnapshot          `json:"http"`
-	RateLimit     RateLimitSnapshot     `json:"rate_limit"`
-	Enrollment    EnrollSnapshot        `json:"enrollment"`
-	DNS           DNSSnapshot           `json:"dns"`
-	ACME          ACMESnapshot          `json:"acme"`
-	LastSeen      LastSeenSnapshot      `json:"last_seen"`
-	Census        CensusSnapshot        `json:"census"`
-	Nexus         NexusSnapshot         `json:"nexus"`
-	Recovery      RecoverySnapshot      `json:"recovery"`
-	Nonce         NonceSnapshot         `json:"nonce"`
-	SetupDiscover SetupDiscoverSnapshot `json:"setup_discover"`
+	HTTP             HTTPSnapshot             `json:"http"`
+	RateLimit        RateLimitSnapshot        `json:"rate_limit"`
+	Enrollment       EnrollSnapshot           `json:"enrollment"`
+	DNS              DNSSnapshot              `json:"dns"`
+	ACME             ACMESnapshot             `json:"acme"`
+	LastSeen         LastSeenSnapshot         `json:"last_seen"`
+	Census           CensusSnapshot           `json:"census"`
+	Nexus            NexusSnapshot            `json:"nexus"`
+	Recovery         RecoverySnapshot         `json:"recovery"`
+	Nonce            NonceSnapshot            `json:"nonce"`
+	SetupDiscover    SetupDiscoverSnapshot    `json:"setup_discover"`
+	AutoUnlock       AutoUnlockSnapshot       `json:"auto_unlock"`
+	AutoUnlockGauges AutoUnlockGaugesSnapshot `json:"auto_unlock_gauges"`
 }
 
 type HTTPSnapshot struct {
@@ -270,4 +306,17 @@ type SetupDiscoverSnapshot struct {
 	NoMatch                int64 `json:"no_match"`
 	Errors                 int64 `json:"errors"`
 	HeartbeatGuardRejected int64 `json:"heartbeat_guard_rejected"`
+}
+
+type AutoUnlockSnapshot struct {
+	Deposited         int64 `json:"deposited"`
+	DepositedReplaced int64 `json:"deposited_replaced"` // subset of deposited
+	DepositedClamped  int64 `json:"deposited_clamped"`  // subset of deposited
+	PickedUp          int64 `json:"picked_up"`
+	Revoked           int64 `json:"revoked"`
+	Expired           int64 `json:"expired"`
+}
+
+type AutoUnlockGaugesSnapshot struct {
+	OldestExpiredAgeSeconds int64 `json:"oldest_expired_age_seconds"` // gauge, not a counter
 }

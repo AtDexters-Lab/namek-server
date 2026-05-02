@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand/v2"
@@ -619,6 +620,70 @@ func (c *Client) GetVouchers(ctx context.Context) ([]VoucherArtifact, error) {
 		return nil, err
 	}
 	return result.Vouchers, nil
+}
+
+// DepositUnlockEscrow calls PUT /api/v1/devices/me/unlock-escrow (authenticated).
+//
+// IMPORTANT: this method is NOT network-idempotent across F regeneration. A
+// retry that regenerates F creates a new escrow row that supersedes the
+// previous one (the prior cycle's secret becomes unrecoverable). Retry only
+// with the same secret bytes.
+//
+// secret must be exactly 32 bytes (256-bit). windowSeconds is the device's
+// requested window; the server clamps it to its configured ceiling and the
+// response's RequestedClamped + EffectiveWindowSeconds reflect the result.
+func (c *Client) DepositUnlockEscrow(ctx context.Context, secret []byte, windowSeconds int) (*DepositUnlockEscrowResponse, error) {
+	body := DepositUnlockEscrowRequest{
+		Secret:        base64.RawURLEncoding.EncodeToString(secret),
+		WindowSeconds: windowSeconds,
+	}
+	resp, err := c.doAuthenticated(ctx, http.MethodPut, "/api/v1/devices/me/unlock-escrow", body)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	var result DepositUnlockEscrowResponse
+	if err := decodeResponse(resp, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+// PickupUnlockEscrow calls GET /api/v1/devices/me/unlock-escrow (authenticated).
+// Returns ErrEscrowNotFound on 404 (no outstanding escrow). All other errors
+// propagate as-is.
+//
+// Idempotent within the escrow's window: a successful pickup may be repeated
+// (same secret returned). The server emits an audit entry on the first
+// successful pickup of a deposit cycle and is silent on retries.
+func (c *Client) PickupUnlockEscrow(ctx context.Context) (*PickupUnlockEscrowResponse, error) {
+	resp, err := c.doAuthenticated(ctx, http.MethodGet, "/api/v1/devices/me/unlock-escrow", nil)
+	if err != nil {
+		var apiErr *APIError
+		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
+			return nil, ErrEscrowNotFound
+		}
+		return nil, err
+	}
+	defer resp.Body.Close()
+	var result PickupUnlockEscrowResponse
+	if err := decodeResponse(resp, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+// RevokeUnlockEscrow calls DELETE /api/v1/devices/me/unlock-escrow (authenticated).
+// Idempotent: always returns nil on 204 even if no row was present. Callers
+// should call this after successful local pickup to clear the server-side row
+// before its natural expiry.
+func (c *Client) RevokeUnlockEscrow(ctx context.Context) error {
+	resp, err := c.doAuthenticated(ctx, http.MethodDelete, "/api/v1/devices/me/unlock-escrow", nil)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	return nil
 }
 
 // VerifyToken calls POST /internal/v1/tokens/verify (Nexus mTLS-authenticated).

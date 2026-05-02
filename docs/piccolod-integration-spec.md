@@ -834,6 +834,115 @@ Delete an ACME challenge and its DNS record.
 | 404 | Challenge not found (or not owned by this device) |
 | 500 | Internal error |
 
+---
+
+### Auto-unlock escrow endpoints (TPM-authenticated)
+
+The auto-unlock escrow holds the per-cycle 256-bit secret `F` that piccolod
+deposits before a planned reboot and retrieves on the way back. After
+successful pickup, `F` is decrypted into the on-disk blob's wrapped KEK and
+the device DELETEs the row to clear server-side state. Failures fall through
+to the manual-unlock fallback ladder (passkey-PRF when shipped; password /
+recovery key as bedrock).
+
+**Singleton-per-device.** A device has at most one outstanding escrow at any
+time. `PUT` replaces any prior row atomically (the prior cycle's `F` becomes
+unrecoverable).
+
+**Lazy expiry.** `GET` filters on `expires_at > NOW()` server-side; expired
+rows are invisible regardless of whether the background sweep has run.
+
+**Re-enrollment.** An in-flight escrow survives device re-enrollment with a
+new AK because the FK is on the stable `device.id`. The new AK authenticates
+the same device row.
+
+#### PUT /api/v1/devices/me/unlock-escrow
+
+Deposit a fresh secret. The server clamps the requested window to the
+configured ceiling (`autoUnlock.maxWindowSeconds`, default 600s) and signals
+the clamp in the response.
+
+**Request:**
+```json
+{
+  "secret": "<base64url-encoded 32-byte secret>",
+  "window_seconds": 600
+}
+```
+
+**Response:** `200 OK`
+```json
+{
+  "expires_at": "2026-05-01T18:35:00.000Z",
+  "effective_window_seconds": 600,
+  "requested_clamped": false
+}
+```
+
+When `requested_clamped` is `true`, `effective_window_seconds` is the value
+the server actually used; clients that rely on a longer window must size their
+post-reboot pickup behavior to the effective value.
+
+**Important:** This call is **not network-idempotent across `F` regeneration**.
+A retry that regenerates `F` creates a new escrow row that supersedes the
+previous one. Retry only with the same secret bytes.
+
+**Errors:**
+| Status | Meaning |
+|--------|---------|
+| 400 | `window_seconds <= 0`, secret length != 32 bytes, or invalid base64url |
+| 401 | TPM auth failed |
+| 500 | Internal error |
+
+#### GET /api/v1/devices/me/unlock-escrow
+
+Pick up the secret. Idempotent within the window — the server emits an audit
+entry on the first successful pickup and is silent on retries.
+
+**Response:** `200 OK`
+```json
+{
+  "secret": "<base64url-encoded 32-byte secret>",
+  "expires_at": "2026-05-01T18:35:00.000Z"
+}
+```
+
+**Response headers:**
+- `Cache-Control: no-store`
+
+This binds HTTP caches as defense-in-depth. It does **NOT** bind
+TLS-terminating reverse proxies that mirror response bodies for access
+logging; see deployment constraint below.
+
+**Errors:**
+| Status | Meaning |
+|--------|---------|
+| 401 | TPM auth failed |
+| 404 | No outstanding escrow (never deposited, expired, or already revoked) — fall through to manual unlock |
+| 500 | Internal error |
+
+#### DELETE /api/v1/devices/me/unlock-escrow
+
+Clear the escrow row after successful local unlock. Always returns 204 even
+if no row exists — the device may retry after a network drop, so the
+operation is idempotent. Server-side audit is gated on whether a row was
+actually deleted.
+
+**Response:** `204 No Content`
+
+#### Deployment constraint — reverse proxy
+
+The PUT request body and the GET response body both carry the secret.
+Operators deploying a TLS-terminating reverse proxy in front of namek-server
+(nginx, Caddy, cloudflared) **MUST** either:
+
+- Disable both **request-body** and **response-body** access logging for
+  every method on `/api/v1/devices/me/unlock-escrow`, **or**
+- Terminate TLS at namek-server itself (no reverse proxy on the
+  secret-bearing path).
+
+The `Cache-Control: no-store` header does not bind reverse-proxy access logs.
+
 ## 10. Error Handling
 
 ### HTTP error codes

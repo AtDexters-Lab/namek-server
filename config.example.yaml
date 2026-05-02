@@ -66,7 +66,18 @@ nonce:
 
 # Per-device rate limiting (applied to all authenticated endpoints)
 deviceRateLimit:
-  mutationPerMin: 60   # POST/DELETE operations (1/sec sustained)
+  mutationPerMin: 60   # POST/PUT/DELETE operations (1/sec sustained)
   mutationBurst: 10
   readPerMin: 120      # GET/PATCH operations (2/sec sustained)
   readBurst: 20
+
+# Auto-unlock escrow service. Holds the per-cycle unlock secret deposited by
+# piccolod pre-reboot and retrieved post-reboot. Devices supply their requested
+# window on each PUT; namek clamps to maxWindowSeconds and signals the clamp in
+# the response. Sweep removes expired rows in chunks bounded by sweepBatchSize
+# and sweepMaxIterations per tick (default 10K rows / 5 min).
+autoUnlock:
+  maxWindowSeconds: 600       # 10 min ceiling on device-requested window
+  cleanupIntervalSeconds: 300 # sweep tick interval
+  sweepBatchSize: 1000        # rows deleted per sweep iteration (LIMIT)
+  sweepMaxIterations: 10      # hard cap on iterations per tick

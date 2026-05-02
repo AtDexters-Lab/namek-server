@@ -32,6 +32,7 @@ type Config struct {
 	Recovery     RecoveryConfig     `yaml:"recovery"`
 	Account      AccountConfig      `yaml:"account"`
 	FleetTrust   FleetTrustConfig   `yaml:"fleetTrust"`
+	AutoUnlock   AutoUnlockConfig   `yaml:"autoUnlock"`
 
 	AuditRetentionDays int `yaml:"auditRetentionDays"`
 }
@@ -177,6 +178,23 @@ type AliasDomainConfig struct {
 	PendingExpiryDays          int    `yaml:"pendingExpiryDays"`
 	VerificationTimeoutSeconds int    `yaml:"verificationTimeoutSeconds"`
 	DNSResolver                string `yaml:"dnsResolver"`
+}
+
+// AutoUnlockConfig tunes the per-device auto-unlock escrow service. The escrow
+// holds the per-cycle unlock secret F that piccolod deposits pre-reboot and
+// retrieves post-reboot. MaxWindowSeconds is the server-side ceiling on the
+// device-requested window; requests above this value are silently clamped and
+// the PUT response signals the clamp via requested_clamped + effective_window_seconds.
+type AutoUnlockConfig struct {
+	MaxWindowSeconds       int `yaml:"maxWindowSeconds"`
+	CleanupIntervalSeconds int `yaml:"cleanupIntervalSeconds"`
+	SweepBatchSize         int `yaml:"sweepBatchSize"`
+	SweepMaxIterations     int `yaml:"sweepMaxIterations"`
+}
+
+// CleanupInterval returns the configured sweep tick interval as a time.Duration.
+func (c AutoUnlockConfig) CleanupInterval() time.Duration {
+	return time.Duration(c.CleanupIntervalSeconds) * time.Second
 }
 
 func Load(path string) (*Config, error) {
@@ -372,6 +390,19 @@ func (c *Config) applyDefaults() {
 	if c.AliasDomain.VerificationTimeoutSeconds == 0 {
 		c.AliasDomain.VerificationTimeoutSeconds = 10
 	}
+	// Auto-unlock escrow defaults
+	if c.AutoUnlock.MaxWindowSeconds == 0 {
+		c.AutoUnlock.MaxWindowSeconds = 600 // 10 min ceiling
+	}
+	if c.AutoUnlock.CleanupIntervalSeconds == 0 {
+		c.AutoUnlock.CleanupIntervalSeconds = 300 // 5 min sweep
+	}
+	if c.AutoUnlock.SweepBatchSize == 0 {
+		c.AutoUnlock.SweepBatchSize = 1000
+	}
+	if c.AutoUnlock.SweepMaxIterations == 0 {
+		c.AutoUnlock.SweepMaxIterations = 10
+	}
 	// PublicHostname is required (never defaulted), so it is always set here.
 	if len(c.DNS.Nameservers) == 0 {
 		c.DNS.Nameservers = []string{c.PublicHostname}
@@ -516,6 +547,18 @@ func (c *Config) validate() error {
 	}
 	if c.AliasDomain.VerificationTimeoutSeconds <= 0 {
 		return fmt.Errorf("aliasDomain.verificationTimeoutSeconds must be positive")
+	}
+	if c.AutoUnlock.MaxWindowSeconds <= 0 {
+		return fmt.Errorf("autoUnlock.maxWindowSeconds must be positive")
+	}
+	if c.AutoUnlock.CleanupIntervalSeconds <= 0 {
+		return fmt.Errorf("autoUnlock.cleanupIntervalSeconds must be positive")
+	}
+	if c.AutoUnlock.SweepBatchSize <= 0 {
+		return fmt.Errorf("autoUnlock.sweepBatchSize must be positive")
+	}
+	if c.AutoUnlock.SweepMaxIterations <= 0 {
+		return fmt.Errorf("autoUnlock.sweepMaxIterations must be positive")
 	}
 	return nil
 }

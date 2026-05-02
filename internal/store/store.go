@@ -8,16 +8,17 @@ import (
 )
 
 type Stores struct {
-	Device   *DeviceStore
-	Nexus    *NexusStore
-	ACME     *ACMEStore
-	Audit    *AuditStore
-	Account  *AccountStore
-	Domain   *DomainStore
-	Invite   *InviteStore
-	Voucher  *VoucherStore
-	Recovery *RecoveryStore
-	Census   *CensusStore
+	Device        *DeviceStore
+	Nexus         *NexusStore
+	ACME          *ACMEStore
+	Audit         *AuditStore
+	Account       *AccountStore
+	Domain        *DomainStore
+	Invite        *InviteStore
+	Voucher       *VoucherStore
+	Recovery      *RecoveryStore
+	Census        *CensusStore
+	UnlockEscrow  *UnlockEscrowStore
 }
 
 // countGroupBy runs "SELECT column, COUNT(*) FROM table GROUP BY column" and
@@ -43,15 +44,16 @@ func countGroupBy(ctx context.Context, pool *pgxpool.Pool, table, column string)
 
 func New(pool *pgxpool.Pool) *Stores {
 	return &Stores{
-		Device:   NewDeviceStore(pool),
-		Nexus:    NewNexusStore(pool),
-		ACME:     NewACMEStore(pool),
-		Audit:    NewAuditStore(pool),
-		Account:  NewAccountStore(pool),
-		Domain:   NewDomainStore(pool),
-		Invite:   NewInviteStore(pool),
-		Voucher:  NewVoucherStore(pool),
-		Recovery: NewRecoveryStore(pool),
-		Census:   NewCensusStore(pool),
+		Device:       NewDeviceStore(pool),
+		Nexus:        NewNexusStore(pool),
+		ACME:         NewACMEStore(pool),
+		Audit:        NewAuditStore(pool),
+		Account:      NewAccountStore(pool),
+		Domain:       NewDomainStore(pool),
+		Invite:       NewInviteStore(pool),
+		Voucher:      NewVoucherStore(pool),
+		Recovery:     NewRecoveryStore(pool),
+		Census:       NewCensusStore(pool),
+		UnlockEscrow: NewUnlockEscrowStore(pool),
 	}
 }

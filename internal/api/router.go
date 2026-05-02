@@ -22,24 +22,25 @@ import (
 )
 
 type RouterDeps struct {
-	Config      *config.Config
-	Logger      *slog.Logger
-	NonceStore  *auth.NonceStore
-	TPMVerifier tpm.Verifier
-	TokenIssuer *token.Issuer
-	DeviceSvc   *service.DeviceService
-	NexusSvc    *service.NexusService
-	TokenSvc    *service.TokenService
-	ACMESvc     *service.ACMEService
-	DomainSvc   *service.DomainService
-	AccountSvc    *service.AccountService
-	VoucherSvc    *service.VoucherService
-	AuditStore    *store.AuditStore
+	Config           *config.Config
+	Logger           *slog.Logger
+	NonceStore       *auth.NonceStore
+	TPMVerifier      tpm.Verifier
+	TokenIssuer      *token.Issuer
+	DeviceSvc        *service.DeviceService
+	NexusSvc         *service.NexusService
+	TokenSvc         *service.TokenService
+	ACMESvc          *service.ACMEService
+	DomainSvc        *service.DomainService
+	AccountSvc       *service.AccountService
+	VoucherSvc       *service.VoucherService
+	UnlockEscrowSvc  *service.UnlockEscrowService
+	AuditStore       *store.AuditStore
 	DeviceStore      *store.DeviceStore
 	AccountStore     *store.AccountStore
 	LastSeenBatcher  *store.LastSeenBatcher
 	Pool             *pgxpool.Pool
-	PowerDNS    *dns.PowerDNSClient
+	PowerDNS         *dns.PowerDNSClient
 }
 
 func NewRouter(deps RouterDeps) http.Handler {
@@ -67,6 +68,7 @@ func NewRouter(deps RouterDeps) http.Handler {
 	acmeH := handler.NewACMEHandler(deps.ACMESvc, deps.Logger)
 	deviceHeartbeatH := handler.NewDeviceHeartbeatHandler(deps.DeviceSvc, deps.Logger)
 	setupDiscoverH := handler.NewSetupDiscoverHandler(deps.DeviceSvc, deps.Config.SetupDiscover.TTL(), deps.Logger)
+	unlockEscrowH := handler.NewUnlockEscrowHandler(deps.UnlockEscrowSvc, deps.Logger)
 
 	// System endpoints (no auth)
 	r.GET("/health", healthH.Health)
@@ -144,6 +146,13 @@ func NewRouter(deps RouterDeps) http.Handler {
 			domainRoutes.POST("/:id/assignments", domainH.AssignDomain)
 			domainRoutes.DELETE("/:id/assignments/:device_id", domainH.UnassignDomain)
 		}
+
+		// Auto-unlock escrow — singleton-per-device record holding the
+		// per-cycle unlock secret F. PUT classified as a mutation (see
+		// DeviceRateLimit), GET as a read.
+		deviceAuth.PUT("/devices/me/unlock-escrow", unlockEscrowH.Deposit)
+		deviceAuth.GET("/devices/me/unlock-escrow", unlockEscrowH.Pickup)
+		deviceAuth.DELETE("/devices/me/unlock-escrow", unlockEscrowH.Revoke)
 	}
 
 	// Setup discovery: unauthenticated, CORS-gated, rate-limited. CORS runs before

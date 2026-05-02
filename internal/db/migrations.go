@@ -8,7 +8,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const currentVersion = 5
+const currentVersion = 6
 
 var migrations = []string{
 	// Version 1: Consolidated schema (original + ACME certs + backend port + RFC 004 stateless resilience)
@@ -256,6 +256,20 @@ var migrations = []string{
 	 ALTER TABLE devices ADD COLUMN IF NOT EXISTS setup_heartbeat_at TIMESTAMPTZ;
 	 CREATE INDEX IF NOT EXISTS idx_devices_setup_discovery
 	     ON devices(ip_address) WHERE setup_heartbeat_at IS NOT NULL;`,
+
+	// Version 6: Auto-unlock escrow — per-device singleton row holding the unlock secret F
+	// that piccolod deposits pre-reboot and retrieves post-reboot. PK on device_id enforces
+	// the singleton invariant; picked_up_at gates the first-pickup audit emit (reset on Upsert).
+	// CASCADE only fires on device DELETE; suspended/revoked devices are blocked at the
+	// auth layer and their escrow rows expire naturally via the sweep.
+	`CREATE TABLE IF NOT EXISTS unlock_escrows (
+	    device_id     UUID PRIMARY KEY REFERENCES devices(id) ON DELETE CASCADE,
+	    secret        BYTEA NOT NULL,
+	    expires_at    TIMESTAMPTZ NOT NULL,
+	    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	    picked_up_at  TIMESTAMPTZ
+	);
+	CREATE INDEX IF NOT EXISTS idx_unlock_escrows_expires_at ON unlock_escrows(expires_at);`,
 }
 
 func Migrate(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger) error {

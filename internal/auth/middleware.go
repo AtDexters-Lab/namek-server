@@ -200,8 +200,9 @@ func NexusAuth(cfg *config.Config, clientCAs *x509.CertPool, logger *slog.Logger
 }
 
 // DeviceRateLimit implements per-device rate limiting with separate limits for
-// mutations (POST, DELETE) and reads (GET, PATCH, etc.). PATCH is intentionally
-// classified as a read — it is idempotent and infrequent (hostname changes).
+// mutations (POST, PUT, DELETE) and reads (GET, PATCH, etc.). PATCH is
+// intentionally classified as a read — it is idempotent and infrequent
+// (hostname changes).
 func DeviceRateLimit(mutPerMin, mutBurst, readPerMin, readBurst int) gin.HandlerFunc {
 	mutBuckets := ratelimit.NewBucketMap[uuid.UUID](10000)
 	readBuckets := ratelimit.NewBucketMap[uuid.UUID](10000)
@@ -217,7 +218,7 @@ func DeviceRateLimit(mutPerMin, mutBurst, readPerMin, readBurst int) gin.Handler
 		}
 		deviceID := deviceIDVal.(uuid.UUID)
 
-		isMutation := c.Request.Method == "POST" || c.Request.Method == "DELETE"
+		isMutation := c.Request.Method == "POST" || c.Request.Method == "PUT" || c.Request.Method == "DELETE"
 
 		var b *ratelimit.Bucket
 		if isMutation {

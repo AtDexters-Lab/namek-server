@@ -85,6 +85,30 @@ type VerifyResult struct {
 	Error string `json:"error,omitempty"`
 }
 
+// DepositUnlockEscrowRequest is the body posted to PUT /api/v1/devices/me/unlock-escrow.
+// Secret is the base64url-encoded 32-byte F. WindowSeconds is the device's
+// requested window; the server clamps it to the configured ceiling.
+type DepositUnlockEscrowRequest struct {
+	Secret        string `json:"secret"`
+	WindowSeconds int    `json:"window_seconds"`
+}
+
+// DepositUnlockEscrowResponse is returned from PUT /api/v1/devices/me/unlock-escrow.
+// RequestedClamped is true when the requested window exceeded the server
+// ceiling; EffectiveWindowSeconds is the value the server actually used.
+type DepositUnlockEscrowResponse struct {
+	ExpiresAt              string `json:"expires_at"`
+	EffectiveWindowSeconds int    `json:"effective_window_seconds"`
+	RequestedClamped       bool   `json:"requested_clamped"`
+}
+
+// PickupUnlockEscrowResponse is returned from GET /api/v1/devices/me/unlock-escrow.
+// Secret is base64url-encoded.
+type PickupUnlockEscrowResponse struct {
+	Secret    string `json:"secret"`
+	ExpiresAt string `json:"expires_at"`
+}
+
 // HeartbeatRequest is the body posted to POST /api/v1/devices/me/heartbeat.
 // Devices in first-time setup mode submit their LAN IPs so that
 // piccolospace.com/setup can surface them to a caller on the same public IP.

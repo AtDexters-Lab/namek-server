@@ -36,4 +36,12 @@ enrollment:
   rateLimitPerSecond: 100
   rateLimitPerIPPerSecond: 50
 
+# Auto-unlock escrow — short cleanup interval for dev so integration tests
+# observing sweep behavior don't have to wait minutes.
+autoUnlock:
+  maxWindowSeconds: 600
+  cleanupIntervalSeconds: 5
+  sweepBatchSize: 1000
+  sweepMaxIterations: 10
+
 auditRetentionDays: 7

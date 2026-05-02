@@ -140,6 +140,7 @@ func main() {
 	voucherSvc := service.NewVoucherService(stores.Voucher, stores.Device, stores.Account, stores.Audit, tpmVerifier, cfg, logger)
 	recoverySvc := service.NewRecoveryService(stores.Recovery, stores.Account, stores.Device, stores.Audit, tpmVerifier, cfg, logger)
 	censusSvc := service.NewCensusService(stores.Census, stores.Device, stores.Audit, pool, cfg, logger)
+	unlockEscrowSvc := service.NewUnlockEscrowService(stores.UnlockEscrow, stores.Audit, cfg, logger)
 	accountSvc.SetVoucherCreator(voucherSvc)
 	deviceSvc.SetRecoveryProcessor(recoverySvc)
 
@@ -148,6 +149,7 @@ func main() {
 	go nexusSvc.HealthCheckLoop(ctx)
 	go acmeSvc.CleanupLoop(ctx)
 	go domainSvc.CleanupLoop(ctx)
+	go unlockEscrowSvc.CleanupLoop(ctx)
 
 	// Pending enrollment cleanup (every 60s)
 	go func() {
@@ -251,10 +253,11 @@ func main() {
 		DeviceSvc:   deviceSvc,
 		NexusSvc:    nexusSvc,
 		TokenSvc:    tokenSvc,
-		ACMESvc:     acmeSvc,
-		DomainSvc:    domainSvc,
-		AccountSvc:   accountSvc,
-		VoucherSvc:   voucherSvc,
+		ACMESvc:         acmeSvc,
+		DomainSvc:       domainSvc,
+		AccountSvc:      accountSvc,
+		VoucherSvc:      voucherSvc,
+		UnlockEscrowSvc: unlockEscrowSvc,
 		DeviceStore:     stores.Device,
 		AccountStore:    stores.Account,
 		LastSeenBatcher: lastSeenBatcher,

@@ -1,12 +1,19 @@
 package namekclient
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strconv"
 	"time"
 )
+
+// ErrEscrowNotFound is returned by PickupUnlockEscrow when the device has no
+// outstanding escrow (never deposited, already expired, or already revoked).
+// Callers should treat this as a terminal signal — fall through to the manual
+// unlock fallback ladder rather than retry.
+var ErrEscrowNotFound = errors.New("namek: no outstanding unlock escrow")
 
 // APIError represents an HTTP error response from the namek server.
 type APIError struct {
