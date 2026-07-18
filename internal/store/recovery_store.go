@@ -191,7 +191,7 @@ func (s *RecoveryStore) DeleteByAccount(ctx context.Context, accountID uuid.UUID
 func (s *RecoveryStore) DeleteClaimsForActiveAccounts(ctx context.Context, retentionDays int) (int64, error) {
 	tag, err := s.pool.Exec(ctx, `
 		DELETE FROM recovery_claims
-		WHERE created_at < NOW() - ($1 || ' days')::interval
+		WHERE created_at < NOW() - make_interval(days => $1)
 		AND EXISTS (
 			SELECT 1 FROM accounts WHERE id = claimed_account_id AND status = 'active'
 		)
@@ -206,7 +206,7 @@ func (s *RecoveryStore) DeleteClaimsForActiveAccounts(ctx context.Context, reten
 func (s *RecoveryStore) DeleteOrphaned(ctx context.Context, olderThanDays int) (int64, error) {
 	tag, err := s.pool.Exec(ctx, `
 		DELETE FROM recovery_claims
-		WHERE created_at < NOW() - ($1 || ' days')::interval
+		WHERE created_at < NOW() - make_interval(days => $1)
 		AND NOT EXISTS (SELECT 1 FROM accounts WHERE id = claimed_account_id)
 	`, olderThanDays)
 	if err != nil {
@@ -249,4 +249,3 @@ func scanRecoveryClaims(rows pgx.Rows) ([]model.RecoveryClaim, error) {
 	}
 	return claims, rows.Err()
 }
-

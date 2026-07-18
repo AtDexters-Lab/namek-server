@@ -42,4 +42,6 @@ dev-down:
 	docker compose -f deploy/docker-compose.dev.yml down -v
 
 test-integration:
-	go test -tags=integration -v -count=1 -timeout=120s ./tests/integration/ ./internal/store/
+	# Both packages share one database and destructively reset global fixtures.
+	# Keep package execution serial so one package cannot erase the other's state.
+	go test -p 1 -tags=integration -v -count=1 -timeout=120s ./tests/integration/ ./internal/store/
